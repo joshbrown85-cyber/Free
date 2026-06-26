@@ -171,7 +171,7 @@ function renderDashboard(){
         </div>
         <div class="tracker-sub">${e.sub}</div>
         <div class="tracker-actions">
-          <button class="btn" onclick="event.stopPropagation(); goToInterventionFor('${t.id}')"><i class="ti ti-life-buoy" style="font-size:14px;vertical-align:-2px;"></i> Need help now</button>
+          <button class="btn" onclick="event.stopPropagation(); goToInterventionFor('${t.id}')"><i class="ti ti-lifebuoy" style="font-size:14px;vertical-align:-2px;"></i> Need help now</button>
           <button class="btn ghost" onclick="event.stopPropagation(); openRelapseConfirm('${t.id}')">Reset</button>
         </div>
       </div>`;
