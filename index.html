@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Free</title>
+<meta name="description" content="A private, on-device tool for tracking recovery streaks and getting through cravings in the moment.">
+
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#15191E">
+
+<!-- iOS PWA support -->
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Free">
+
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/tabler-icons.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1 class="sr-only">Free — a private tool for tracking recovery streaks and getting through cravings in the moment</h1>
+<div id="app">
+
+  <!-- ===================== DASHBOARD ===================== -->
+  <div class="screen active" id="screen-dashboard">
+    <header class="top">
+      <h1 class="serif">Free</h1>
+      <span class="date" id="today-date"></span>
+    </header>
+    <div id="install-banner" class="install-banner">
+      <span class="txt">Add Free to your home screen so it's one tap away.</span>
+      <button class="btn primary" id="install-btn">Install</button>
+    </div>
+    <div id="tracker-list"></div>
+    <div class="empty" id="dashboard-empty" style="display:none;">
+      <div class="icn"><i class="ti ti-plant-2" style="font-size:36px;"></i></div>
+      <p>Nothing tracked yet.<br>Add what you're working on — there's no judgment in the number, just information.</p>
+      <button class="btn primary" onclick="openAddTracker()">Add something to track</button>
+    </div>
+  </div>
+
+  <!-- ===================== REASONS ===================== -->
+  <div class="screen" id="screen-reasons">
+    <header class="top"><h1 class="serif">Reasons</h1></header>
+    <select class="reason-select" id="reasons-tracker-select" onchange="renderReasons()"></select>
+    <div id="reasons-list"></div>
+    <div class="empty" id="reasons-empty" style="display:none;">
+      <div class="icn"><i class="ti ti-feather" style="font-size:32px;"></i></div>
+      <p>Write down why this matters to you.<br>Future-you, mid-craving, will need this more than present-you imagines.</p>
+    </div>
+    <button class="btn primary full" style="margin-top:6px;" onclick="openAddReason()">
+      <i class="ti ti-plus" style="font-size:15px;vertical-align:-2px;"></i> Add a reason
+    </button>
+  </div>
+
+  <!-- ===================== INTERVENTION ===================== -->
+  <div class="screen" id="screen-intervention">
+    <header class="top"><h1 class="serif">Right now</h1></header>
+    <div class="intervention-context" id="intervention-context"></div>
+    <div class="sos-hero">
+      <div class="ring"><div class="ring-inner"><i class="ti ti-flame" style="font-size:34px;color:var(--amber-bright);"></i></div></div>
+      <p>Having an urge? It will pass — most peak and fade within 15&nbsp;minutes. Pick something below to ride it out.</p>
+    </div>
+
+    <div class="section-label">Calm the body</div>
+    <div class="option-grid">
+      <div class="option-tile" onclick="startBreathing()">
+        <div class="icn"><i class="ti ti-wind" style="font-size:24px;"></i></div>
+        <div class="lbl">Breathe</div>
+        <div class="sub">guided, 1 min</div>
+      </div>
+      <div class="option-tile" onclick="startTimer()">
+        <div class="icn"><i class="ti ti-hourglass" style="font-size:24px;"></i></div>
+        <div class="lbl">Delay timer</div>
+        <div class="sub">10 min countdown</div>
+      </div>
+    </div>
+
+    <div class="section-label">Occupy your hands & mind</div>
+    <div class="option-grid">
+      <div class="option-tile" onclick="startTapGame()">
+        <div class="icn"><i class="ti ti-hand-stop" style="font-size:24px;"></i></div>
+        <div class="lbl">Tap it out</div>
+        <div class="sub">restless energy</div>
+      </div>
+      <div class="option-tile" onclick="startQuote()">
+        <div class="icn"><i class="ti ti-quote" style="font-size:24px;"></i></div>
+        <div class="lbl">A reminder</div>
+        <div class="sub">words for now</div>
+      </div>
+    </div>
+
+    <div class="section-label">Reach out</div>
+    <div class="option-grid" style="grid-template-columns:1fr;">
+      <div class="option-tile" onclick="showMyReasons()" style="text-align:left;display:flex;align-items:center;gap:12px;">
+        <div class="icn" style="margin:0;"><i class="ti ti-heart" style="font-size:22px;"></i></div>
+        <div>
+          <div class="lbl">Read your reasons</div>
+          <div class="sub">why this matters to you</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== KNOWLEDGE ===================== -->
+  <div class="screen" id="screen-knowledge">
+    <header class="top"><h1 class="serif">Knowledge</h1></header>
+    <div class="topic-chip-row" id="topic-chips"></div>
+    <div id="article-list"></div>
+  </div>
+
+  <!-- ===================== TAB BAR ===================== -->
+  <nav class="tabbar">
+    <button class="active" data-screen="dashboard" onclick="switchScreen('dashboard')">
+      <i class="ti ti-home" style="font-size:21px;"></i>Today
+    </button>
+    <button data-screen="reasons" onclick="switchScreen('reasons')">
+      <i class="ti ti-feather" style="font-size:21px;"></i>Reasons
+    </button>
+    <button data-screen="intervention" onclick="openInterventionTab()">
+      <i class="ti ti-life-buoy" style="font-size:21px;"></i>Right now
+    </button>
+    <button data-screen="knowledge" onclick="switchScreen('knowledge')">
+      <i class="ti ti-book" style="font-size:21px;"></i>Learn
+    </button>
+  </nav>
+
+  <button class="fab" id="fab-add" onclick="openAddTracker()" aria-label="Add a new tracker">
+    <i class="ti ti-plus" style="font-size:24px;"></i>
+  </button>
+
+  <!-- ===================== MODALS ===================== -->
+  <div class="modal-backdrop" id="modal-add-tracker">
+    <div class="modal-sheet">
+      <h2 class="serif">What are you working on?</h2>
+      <div class="modal-row">
+        <label class="field-label">Name it</label>
+        <input type="text" id="new-tracker-name" placeholder="e.g. Smoking, Doomscrolling, Drinking" maxlength="40">
+      </div>
+      <div class="modal-row">
+        <label class="field-label">Color</label>
+        <div class="color-pick" id="color-pick"></div>
+      </div>
+      <div class="modal-row">
+        <label class="field-label">Started on</label>
+        <input type="datetime-local" id="new-tracker-start">
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal('modal-add-tracker')">Cancel</button>
+        <button class="btn primary" onclick="saveNewTracker()">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-tracker-detail">
+    <div class="modal-sheet" id="tracker-detail-content"></div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-add-reason">
+    <div class="modal-sheet">
+      <h2 class="serif">Why does this matter?</h2>
+      <div class="modal-row">
+        <label class="field-label">For</label>
+        <select id="new-reason-tracker"></select>
+      </div>
+      <div class="modal-row">
+        <label class="field-label">Your reason</label>
+        <textarea id="new-reason-text" placeholder="Be specific. Who or what comes to mind? What does the cost actually feel like?"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal('modal-add-reason')">Cancel</button>
+        <button class="btn primary" onclick="saveNewReason()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="modal-relapse-confirm">
+    <div class="modal-sheet">
+      <h2 class="serif">Reset this streak?</h2>
+      <p style="font-size:14px;color:var(--text-muted);line-height:1.6;margin:0 0 18px;">
+        This just restarts the clock — it doesn't erase the time that came before it, and it doesn't undo the reasons you wrote down. Slips are data, not verdicts.
+      </p>
+      <div class="modal-actions">
+        <button class="btn ghost" onclick="closeModal('modal-relapse-confirm')">Never mind</button>
+        <button class="btn urgent" id="confirm-relapse-btn">Reset streak</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ===================== EXERCISE OVERLAYS ===================== -->
+<div class="exercise-overlay" id="overlay-breathing">
+  <div class="close" onclick="closeOverlay('overlay-breathing')" aria-label="Close"><i class="ti ti-x" style="font-size:22px;"></i></div>
+  <div class="breath-circle" id="breath-circle"><span class="lbl" id="breath-label">Breathe in</span></div>
+  <div class="breath-count" id="breath-count">Cycle 1 of 6</div>
+</div>
+
+<div class="exercise-overlay" id="overlay-quote">
+  <div class="close" onclick="closeOverlay('overlay-quote')" aria-label="Close"><i class="ti ti-x" style="font-size:22px;"></i></div>
+  <i class="ti ti-quote" style="font-size:28px;color:var(--text-faint);margin-bottom:20px;"></i>
+  <div class="quote-display serif" id="quote-text"></div>
+  <div class="quote-source" id="quote-source"></div>
+  <button class="btn primary" onclick="startQuote()">Another</button>
+</div>
+
+<div class="exercise-overlay" id="overlay-timer">
+  <div class="close" onclick="closeOverlay('overlay-timer')" aria-label="Close"><i class="ti ti-x" style="font-size:22px;"></i></div>
+  <div class="timer-display" id="timer-display">10:00</div>
+  <div class="timer-sub">Just ride it out till this hits zero. You don't have to decide anything else right now — only this.</div>
+  <button class="btn ghost" id="timer-toggle" onclick="toggleTimer()">Pause</button>
+</div>
+
+<div class="exercise-overlay" id="overlay-tap">
+  <div class="close" onclick="closeOverlay('overlay-tap')" aria-label="Close"><i class="ti ti-x" style="font-size:22px;"></i></div>
+  <div class="tap-zone" id="tap-zone" onclick="doTap()">
+    <span class="n" id="tap-count">0</span>
+    <span class="l">tap</span>
+  </div>
+  <div class="timer-sub" style="margin-bottom:0;">Tap until the urge to act on something else fades a little. There's no score — this is just for your hands.</div>
+</div>
+
+<script src="db.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
