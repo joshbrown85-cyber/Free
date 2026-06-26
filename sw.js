@@ -3,7 +3,7 @@
 // network-first fallback isn't needed since this app has no remote API
 // calls of its own — all data lives in IndexedDB on-device.
 
-const CACHE_NAME = 'free-cache-v2';
+const CACHE_NAME = 'free-cache-v3';
 
 const APP_SHELL = [
   './',
