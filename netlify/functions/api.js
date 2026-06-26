@@ -75,6 +75,20 @@ async function handleKnowledge(event) {
     const searchPromises = queries.map(q => braveSearch(q));
     const searchResults = await Promise.allSettled(searchPromises);
 
+    // Debug: log what Brave returned
+    for (const result of searchResults) {
+      if (result.status === 'rejected') {
+        console.error('Brave search rejected:', result.reason);
+      } else {
+        console.log('Brave response keys:', JSON.stringify(Object.keys(result.value || {})));
+        if (!result.value || !result.value.web) {
+          console.error('Brave no web results:', JSON.stringify(result.value).slice(0, 500));
+        } else {
+          console.log('Brave web results count:', result.value.web.results.length);
+        }
+      }
+    }
+
     // Collect all results, dedupe by domain
     const allResults = [];
     const seenDomains = new Set();
