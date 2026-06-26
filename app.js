@@ -82,8 +82,10 @@ const ARTICLES = {
 };
 
 // ---------------- STORAGE LAYER ----------------
-let trackers = [];   // {id, name, color, startedAt}
-let reasons = [];    // {id, trackerId, text, createdAt}
+let trackers = [];       // {id, name, color, startedAt}
+let reasons = [];        // {id, trackerId, text, createdAt}
+let streakHistory = [];  // {id, trackerId, startedAt, endedAt}
+let journal = [];        // {id, trackerId, trigger, text, createdAt}
 
 async function loadState(){
   try{
@@ -94,6 +96,14 @@ async function loadState(){
     const r = await window.storage.get('reasons');
     reasons = r || [];
   }catch(e){ console.error('load reasons failed', e); reasons = []; }
+  try{
+    const h = await window.storage.get('streakHistory');
+    streakHistory = h || [];
+  }catch(e){ console.error('load streakHistory failed', e); streakHistory = []; }
+  try{
+    const j = await window.storage.get('journal');
+    journal = j || [];
+  }catch(e){ console.error('load journal failed', e); journal = []; }
 }
 
 async function saveTrackers(){
@@ -103,6 +113,14 @@ async function saveTrackers(){
 async function saveReasons(){
   try{ await window.storage.set('reasons', reasons); }
   catch(e){ console.error('save reasons failed', e); }
+}
+async function saveStreakHistory(){
+  try{ await window.storage.set('streakHistory', streakHistory); }
+  catch(e){ console.error('save streakHistory failed', e); }
+}
+async function saveJournal(){
+  try{ await window.storage.set('journal', journal); }
+  catch(e){ console.error('save journal failed', e); }
 }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -248,6 +266,66 @@ function openTrackerDetail(id){
   if(!t) return;
   const e = fmtElapsed(t.startedAt);
   const content = document.getElementById('tracker-detail-content');
+
+  // Build streak history bars.
+  const history = streakHistory.filter(h=>h.trackerId===id)
+    .sort((a,b)=>new Date(b.endedAt)-new Date(a.endedAt));
+  const maxDur = Math.max(
+    ...history.map(h=>new Date(h.endedAt)-new Date(h.startedAt)),
+    Date.now()-new Date(t.startedAt).getTime(), // include current streak
+    1
+  );
+
+  let historyHtml = '';
+  if(history.length > 0){
+    // Current streak bar (if > 0)
+    const currentMs = Date.now() - new Date(t.startedAt).getTime();
+    const currentPct = Math.max(3, (currentMs / maxDur) * 100);
+    const currentE = fmtElapsed(t.startedAt);
+    historyHtml += `<div class="streak-bar-row">
+      <span class="streak-bar-dur">${currentE.num}${currentE.unit.charAt(0)}</span>
+      <div class="streak-bar" style="width:${currentPct}%;background:${t.color};opacity:1;"></div>
+      <span class="streak-bar-label">now</span>
+    </div>`;
+
+    // Past streaks (show up to 10)
+    history.slice(0,10).forEach(h=>{
+      const dur = new Date(h.endedAt) - new Date(h.startedAt);
+      const pct = Math.max(3, (dur / maxDur) * 100);
+      const days = Math.floor(dur / 86400000);
+      const hours = Math.floor((dur % 86400000) / 3600000);
+      const durLabel = days >= 1 ? days+'d' : hours+'h';
+      const dateLabel = new Date(h.endedAt).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+      historyHtml += `<div class="streak-bar-row">
+        <span class="streak-bar-dur">${durLabel}</span>
+        <div class="streak-bar" style="width:${pct}%;background:${t.color};opacity:0.5;"></div>
+        <span class="streak-bar-label">${dateLabel}</span>
+      </div>`;
+    });
+  } else {
+    historyHtml = '<div class="streak-history-empty">This is your first streak. Keep going.</div>';
+  }
+
+  // Build journal entries.
+  const entries = journal.filter(j=>j.trackerId===id)
+    .sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+  let journalHtml = '';
+  if(entries.length > 0){
+    entries.slice(0,5).forEach(j=>{
+      journalHtml += `<div class="journal-item">
+        <span class="del" onclick="event.stopPropagation(); deleteJournalEntry('${j.id}')"><i class="ti ti-x" style="font-size:14px;"></i></span>
+        ${j.trigger ? '<div class="trigger">'+escapeHtml(j.trigger)+'</div>' : ''}
+        <div class="body">${escapeHtml(j.text)}</div>
+        <div class="meta">${new Date(j.createdAt).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}</div>
+      </div>`;
+    });
+    if(entries.length > 5){
+      journalHtml += `<div style="font-size:12px;color:var(--text-faint);text-align:center;padding:4px;">+${entries.length-5} more entries</div>`;
+    }
+  } else {
+    journalHtml = '<div class="streak-history-empty">No journal entries yet.</div>';
+  }
+
   content.innerHTML = `
     <h2 class="serif">${escapeHtml(t.name)}</h2>
     <p style="font-size:13px;color:var(--text-muted);margin:-8px 0 18px;">Tracking since ${new Date(t.startedAt).toLocaleString(undefined,{dateStyle:'medium', timeStyle:'short'})}</p>
@@ -255,19 +333,38 @@ function openTrackerDetail(id){
       <div class="num serif" style="font-size:44px;color:${t.color}">${e.num}</div>
       <div style="color:var(--text-muted);font-size:13px;">${e.unit} clean &middot; ${e.sub}</div>
     </div>
-    <div class="modal-actions" style="margin-top:0;">
-      <button class="btn ghost full" onclick="closeModal('modal-tracker-detail'); openRelapseConfirm('${t.id}')">Reset streak</button>
-      <button class="btn ghost full" style="color:var(--danger);border-color:var(--danger);" onclick="deleteTracker('${t.id}')">Delete</button>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Streak history</div>
+      <div class="streak-bar-list">${historyHtml}</div>
     </div>
-    <button class="btn full" style="margin-top:10px;" onclick="closeModal('modal-tracker-detail')">Close</button>
+
+    <div class="detail-section">
+      <div class="detail-section-title">
+        Journal
+        <span class="action" onclick="closeModal('modal-tracker-detail'); openJournalEntry('${t.id}')">+ Add entry</span>
+      </div>
+      ${journalHtml}
+    </div>
+
+    <div class="modal-actions" style="margin-top:20px;">
+      <button class="btn ghost full" onclick="closeModal('modal-tracker-detail'); openEditTracker('${t.id}')"><i class="ti ti-pencil" style="font-size:14px;vertical-align:-2px;"></i> Edit</button>
+      <button class="btn ghost full" onclick="closeModal('modal-tracker-detail'); openRelapseConfirm('${t.id}')">Reset</button>
+    </div>
+    <button class="btn ghost full" style="margin-top:8px;color:var(--danger);border-color:var(--danger);" onclick="deleteTracker('${t.id}')">Delete tracker</button>
+    <button class="btn full" style="margin-top:8px;" onclick="closeModal('modal-tracker-detail')">Close</button>
   `;
   openModal('modal-tracker-detail');
 }
 async function deleteTracker(id){
   trackers = trackers.filter(t=>t.id!==id);
   reasons = reasons.filter(r=>r.trackerId!==id);
+  streakHistory = streakHistory.filter(h=>h.trackerId!==id);
+  journal = journal.filter(j=>j.trackerId!==id);
   await saveTrackers();
   await saveReasons();
+  await saveStreakHistory();
+  await saveJournal();
   closeModal('modal-tracker-detail');
   renderDashboard();
 }
@@ -345,6 +442,69 @@ function showMyReasons(){
       renderReasons();
     }
   }
+}
+
+// ---------------- EDIT TRACKER ----------------
+let editingTrackerId = null;
+function openEditTracker(id){
+  const t = trackers.find(x=>x.id===id);
+  if(!t) return;
+  editingTrackerId = id;
+  document.getElementById('edit-tracker-name').value = t.name;
+  const now = new Date(t.startedAt);
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  document.getElementById('edit-tracker-start').value = now.toISOString().slice(0,16);
+  const pick = document.getElementById('edit-color-pick');
+  pick.innerHTML = COLORS.map(c=>`<span style="background:${c.hex}" class="${c.hex===t.color?'sel':''}" data-hex="${c.hex}" onclick="selectEditColor(this)"></span>`).join('');
+  openModal('modal-edit-tracker');
+}
+function selectEditColor(el){
+  document.querySelectorAll('#edit-color-pick span').forEach(s=>s.classList.remove('sel'));
+  el.classList.add('sel');
+}
+async function saveEditTracker(){
+  const t = trackers.find(x=>x.id===editingTrackerId);
+  if(!t) return;
+  const name = document.getElementById('edit-tracker-name').value.trim();
+  if(!name) return;
+  const colorEl = document.querySelector('#edit-color-pick span.sel');
+  t.name = name;
+  if(colorEl) t.color = colorEl.dataset.hex;
+  const startVal = document.getElementById('edit-tracker-start').value;
+  if(startVal) t.startedAt = new Date(startVal).toISOString();
+  await saveTrackers();
+  closeModal('modal-edit-tracker');
+  renderDashboard();
+}
+
+// ---------------- JOURNAL ----------------
+function openJournalEntry(trackerId){
+  const sel = document.getElementById('journal-tracker-select');
+  sel.innerHTML = trackers.map(t=>`<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+  if(trackerId) sel.value = trackerId;
+  document.getElementById('journal-trigger').value = '';
+  document.getElementById('journal-text').value = '';
+  openModal('modal-journal-entry');
+}
+async function saveJournalEntry(){
+  const trackerId = document.getElementById('journal-tracker-select').value;
+  const trigger = document.getElementById('journal-trigger').value.trim();
+  const text = document.getElementById('journal-text').value.trim();
+  if(!text || !trackerId) return;
+  journal.push({id:uid(), trackerId, trigger, text, createdAt:new Date().toISOString()});
+  await saveJournal();
+  closeModal('modal-journal-entry');
+}
+async function deleteJournalEntry(id){
+  journal = journal.filter(j=>j.id!==id);
+  await saveJournal();
+  // Close and re-render — the detail modal will update on next open.
+  closeModal('modal-tracker-detail');
+  renderDashboard();
+}
+function openJournalAfterReset(){
+  closeModal('modal-post-reset');
+  openJournalEntry(pendingRelapseId);
 }
 
 // ---------------- INTERVENTION: BREATHING ----------------
@@ -607,11 +767,22 @@ if('serviceWorker' in navigator){
 document.getElementById('confirm-relapse-btn').addEventListener('click', async ()=>{
   const t = trackers.find(x=>x.id===pendingRelapseId);
   if(t){
+    // Save the completed streak to history before resetting.
+    streakHistory.push({
+      id: uid(),
+      trackerId: t.id,
+      startedAt: t.startedAt,
+      endedAt: new Date().toISOString()
+    });
+    await saveStreakHistory();
+
     t.startedAt = new Date().toISOString();
     await saveTrackers();
     renderDashboard();
   }
   closeModal('modal-relapse-confirm');
+  // Offer to journal about what happened.
+  openModal('modal-post-reset');
 });
 
 // ---------------- QUOTE PRE-FETCHING ----------------
