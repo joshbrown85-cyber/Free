@@ -51,6 +51,12 @@ const QUOTES = [
 let quotePool = [...QUOTES];
 let lastQuoteIndex = -1;
 
+// Dashboard: whether hidden trackers are currently revealed.
+let showHidden = false;
+
+// Knowledge: custom topic searches saved by the user.
+let customTopics = []; // [{k: 'sugar', l: 'Sugar'}]
+
 const ARTICLES = {
   general: [
     {tag:'Foundation', title:'Why willpower alone usually fails', body:'A look at why habit change works better through environment design and pre-commitment than through sheer self-control in the moment.', url:'https://jamesclear.com/willpower-self-control'},
@@ -104,6 +110,10 @@ async function loadState(){
     const j = await window.storage.get('journal');
     journal = j || [];
   }catch(e){ console.error('load journal failed', e); journal = []; }
+  try{
+    const ct = await window.storage.get('customTopics');
+    customTopics = ct || [];
+  }catch(e){ console.error('load customTopics failed', e); customTopics = []; }
 }
 
 async function saveTrackers(){
@@ -121,6 +131,10 @@ async function saveStreakHistory(){
 async function saveJournal(){
   try{ await window.storage.set('journal', journal); }
   catch(e){ console.error('save journal failed', e); }
+}
+async function saveCustomTopics(){
+  try{ await window.storage.set('customTopics', customTopics); }
+  catch(e){ console.error('save customTopics failed', e); }
 }
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -164,22 +178,40 @@ function fmtElapsed(startIso){
 function renderDashboard(){
   const list = document.getElementById('tracker-list');
   const empty = document.getElementById('dashboard-empty');
+  const toggleBtn = document.getElementById('toggle-hidden-btn');
   document.getElementById('today-date').textContent = new Date().toLocaleDateString(undefined,{weekday:'short', month:'short', day:'numeric'});
 
   if(trackers.length === 0){
     list.innerHTML = '';
     empty.style.display = 'block';
+    toggleBtn.style.display = 'none';
     return;
   }
   empty.style.display = 'none';
 
-  list.innerHTML = trackers.map(t=>{
+  // Show the eye toggle only if there are hidden trackers.
+  const hasHidden = trackers.some(t=>t.hidden);
+  toggleBtn.style.display = hasHidden ? 'inline-flex' : 'none';
+  toggleBtn.classList.toggle('active', showHidden);
+  toggleBtn.querySelector('i').className = showHidden ? 'ti ti-eye' : 'ti ti-eye-off';
+
+  // Filter visible trackers.
+  const visible = showHidden ? trackers : trackers.filter(t=>!t.hidden);
+
+  if(visible.length === 0 && !showHidden){
+    list.innerHTML = '<div class="empty" style="padding:30px 20px;"><p>All trackers are hidden. Tap the <i class="ti ti-eye-off" style="font-size:14px;"></i> icon above to reveal them.</p></div>';
+    return;
+  }
+
+  list.innerHTML = visible.map(t=>{
     const e = fmtElapsed(t.startedAt);
+    const hiddenClass = t.hidden ? ' hidden-tracker' : '';
     return `
-      <div class="tracker-card" onclick="openTrackerDetail('${t.id}')">
+      <div class="tracker-card${hiddenClass}" onclick="openTrackerDetail('${t.id}')">
         <div class="tracker-top">
           <div class="tracker-name">
             <span class="dot breathe" style="background:${t.color}"></span>${escapeHtml(t.name)}
+            ${t.hidden ? '<i class="ti ti-eye-off" style="font-size:13px;color:var(--text-faint);margin-left:6px;"></i>' : ''}
           </div>
           <i class="ti ti-chevron-right" style="color:var(--text-faint);font-size:18px;"></i>
         </div>
@@ -194,6 +226,11 @@ function renderDashboard(){
         </div>
       </div>`;
   }).join('');
+}
+
+function toggleShowHidden(){
+  showHidden = !showHidden;
+  renderDashboard();
 }
 
 function escapeHtml(s){
@@ -456,6 +493,7 @@ function openEditTracker(id){
   document.getElementById('edit-tracker-start').value = now.toISOString().slice(0,16);
   const pick = document.getElementById('edit-color-pick');
   pick.innerHTML = COLORS.map(c=>`<span style="background:${c.hex}" class="${c.hex===t.color?'sel':''}" data-hex="${c.hex}" onclick="selectEditColor(this)"></span>`).join('');
+  document.getElementById('edit-tracker-hidden').checked = !!t.hidden;
   openModal('modal-edit-tracker');
 }
 function selectEditColor(el){
@@ -472,6 +510,7 @@ async function saveEditTracker(){
   if(colorEl) t.color = colorEl.dataset.hex;
   const startVal = document.getElementById('edit-tracker-start').value;
   if(startVal) t.startedAt = new Date(startVal).toISOString();
+  t.hidden = document.getElementById('edit-tracker-hidden').checked;
   await saveTrackers();
   closeModal('modal-edit-tracker');
   renderDashboard();
@@ -639,11 +678,19 @@ const TOPIC_META = [
 
 function renderKnowledge(){
   const chips = document.getElementById('topic-chips');
-  chips.innerHTML = TOPIC_META.map(t=>`<div class="chip ${t.k===activeTopic?'active':''}" onclick="selectTopic('${t.k}')">${t.l}</div>`).join('');
+  // Built-in chips + custom chips with remove buttons.
+  let chipHtml = TOPIC_META.map(t=>`<div class="chip ${t.k===activeTopic?'active':''}" onclick="selectTopic('${t.k}')">${t.l}</div>`).join('');
+  chipHtml += customTopics.map(t=>`<div class="chip ${t.k===activeTopic?'active':''}" onclick="selectTopic('${t.k}')">${escapeHtml(t.l)}<span class="remove" onclick="event.stopPropagation(); removeCustomTopic('${t.k}')">&times;</span></div>`).join('');
+  chips.innerHTML = chipHtml;
 
-  // Show static articles immediately as a baseline.
+  // Clear search input.
+  const searchInput = document.getElementById('knowledge-search');
+  if(searchInput && document.activeElement !== searchInput) searchInput.value = '';
+
+  // Show static articles immediately as a baseline (only for built-in topics).
   const staticArts = ARTICLES[activeTopic] || [];
-  renderArticleList(staticArts);
+  if(staticArts.length) renderArticleList(staticArts);
+  else if(!dynamicArticleCache[activeTopic]) renderArticleList([]);
 
   // If we already fetched dynamic articles for this topic this session, show those instead.
   if(dynamicArticleCache[activeTopic]){
@@ -655,7 +702,6 @@ function renderKnowledge(){
   loadCachedArticles(activeTopic).then(cached => {
     if(cached && cached.length){
       dynamicArticleCache[activeTopic] = cached;
-      // Only overwrite if the user hasn't switched topics while we loaded.
       if(activeTopic === cached._topic) renderArticleList(cached);
     }
   });
@@ -667,7 +713,12 @@ function renderKnowledge(){
 }
 
 function renderArticleList(arts){
-  document.getElementById('article-list').innerHTML = arts.map(a=>`
+  const listEl = document.getElementById('article-list');
+  if(arts.length === 0){
+    listEl.innerHTML = '<div class="streak-history-empty">No articles found for this topic yet.</div>';
+    return;
+  }
+  listEl.innerHTML = arts.map(a=>`
     <div class="article-card">
       <div class="tag">${escapeHtml(a.tag)}</div>
       <h3>${escapeHtml(a.title)}</h3>
@@ -679,7 +730,6 @@ function renderArticleList(arts){
 
 async function fetchDynamicArticles(topic){
   const listEl = document.getElementById('article-list');
-  // Add a subtle loading indicator below existing content.
   const loader = document.createElement('div');
   loader.className = 'knowledge-loading';
   loader.innerHTML = '<span>Finding fresh reading material…</span>';
@@ -690,22 +740,17 @@ async function fetchDynamicArticles(topic){
     if(!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if(data.articles && data.articles.length){
-      // Tag the cache so we can check if the topic still matches on async return.
       data.articles._topic = topic;
       dynamicArticleCache[topic] = data.articles;
-      // Persist to IndexedDB for offline use next time.
       saveCachedArticles(topic, data.articles);
-      // Only render if the user hasn't switched topics while we were fetching.
       if(activeTopic === topic){
         renderArticleList(data.articles);
       }
     }
   }catch(e){
     console.error('Dynamic article fetch failed:', e);
-    // Static articles are already showing — no action needed.
   }
 
-  // Remove loading indicator if it's still there.
   const existing = listEl.querySelector('.knowledge-loading');
   if(existing) existing.remove();
 }
@@ -720,7 +765,6 @@ async function loadCachedArticles(topic){
   try{
     const cached = await window.storage.get('knowledge-' + topic);
     if(!cached) return null;
-    // Expire after 24 hours.
     if(Date.now() - cached.ts > 86400000) return null;
     const arts = cached.articles;
     arts._topic = topic;
@@ -729,6 +773,38 @@ async function loadCachedArticles(topic){
 }
 function selectTopic(k){
   activeTopic = k;
+  renderKnowledge();
+}
+
+async function searchCustomTopic(){
+  const input = document.getElementById('knowledge-search');
+  const query = input.value.trim();
+  if(!query) return;
+  // Normalize the key.
+  const key = query.toLowerCase().replace(/[^a-z0-9 ]/g,'').replace(/\s+/g,'-');
+  // Don't add if it matches a built-in topic.
+  if(TOPIC_META.some(t=>t.k===key)) {
+    selectTopic(key);
+    input.value = '';
+    return;
+  }
+  // Don't add duplicates.
+  if(!customTopics.some(t=>t.k===key)){
+    customTopics.push({k:key, l:query.charAt(0).toUpperCase()+query.slice(1)});
+    await saveCustomTopics();
+  }
+  input.value = '';
+  activeTopic = key;
+  renderKnowledge();
+}
+
+async function removeCustomTopic(k){
+  customTopics = customTopics.filter(t=>t.k!==k);
+  await saveCustomTopics();
+  // If we were viewing the removed topic, switch back to general.
+  if(activeTopic === k){
+    activeTopic = 'general';
+  }
   renderKnowledge();
 }
 
