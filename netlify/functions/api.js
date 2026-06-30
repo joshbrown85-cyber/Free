@@ -68,7 +68,11 @@ exports.handler = async (event) => {
 
 async function handleKnowledge(event) {
   const topic = (event.queryStringParameters.topic || 'general').toLowerCase();
-  const queries = TOPIC_QUERIES[topic] || TOPIC_QUERIES.general;
+  // Use predefined queries for known topics, or build dynamic queries for custom ones.
+  const queries = TOPIC_QUERIES[topic] || [
+    `how to overcome ${topic} addiction strategies`,
+    `${topic} recovery coping skills evidence-based`
+  ];
 
   try {
     // Step 1: Run all Brave queries in parallel
