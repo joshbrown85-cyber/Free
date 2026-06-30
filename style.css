@@ -587,6 +587,85 @@ label.field-label{
 .install-banner button{flex:0 0 auto;font-size:13px;padding:8px 14px;}
 
 /* ===================== STREAK HISTORY ===================== */
+
+/* header icon button */
+.header-icon{
+  background:none;
+  border:none;
+  color:var(--text-faint);
+  cursor:pointer;
+  padding:4px;
+  transition:color 0.15s;
+}
+.header-icon.active{color:var(--sage-bright);}
+
+/* hidden tracker indicator */
+.tracker-card.hidden-tracker{
+  opacity:0.55;
+  border-style:dashed;
+}
+
+/* toggle switch */
+.toggle-switch{
+  position:relative;
+  display:inline-block;
+  width:44px;
+  height:24px;
+  flex:0 0 auto;
+}
+.toggle-switch input{opacity:0;width:0;height:0;}
+.toggle-slider{
+  position:absolute;
+  cursor:pointer;
+  inset:0;
+  background:var(--surface-raised);
+  border:0.5px solid var(--border-strong);
+  border-radius:24px;
+  transition:background 0.2s;
+}
+.toggle-slider::before{
+  content:'';
+  position:absolute;
+  width:18px;height:18px;
+  left:3px;bottom:3px;
+  background:var(--text-muted);
+  border-radius:50%;
+  transition:transform 0.2s, background 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider{
+  background:var(--sage-dim);
+  border-color:var(--sage);
+}
+.toggle-switch input:checked + .toggle-slider::before{
+  transform:translateX(20px);
+  background:var(--sage-bright);
+}
+
+/* knowledge search bar */
+.search-bar{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-bottom:14px;
+}
+.search-bar input{
+  flex:1;
+  font-size:14px;
+  padding:9px 12px;
+}
+.search-bar button{flex:0 0 auto;}
+
+/* custom chip with remove button */
+.chip .remove{
+  margin-left:4px;
+  cursor:pointer;
+  opacity:0.6;
+  font-size:12px;
+  vertical-align:0px;
+}
+.chip .remove:hover{opacity:1;}
+
+.streak-history{margin-top:16px;}
 .streak-history{margin-top:16px;}
 .streak-history .section-title{
   font-size:12px;
