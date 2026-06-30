@@ -27,7 +27,12 @@
   <div class="screen active" id="screen-dashboard">
     <header class="top">
       <h1 class="serif">Free</h1>
-      <span class="date" id="today-date"></span>
+      <div style="display:flex;align-items:center;gap:14px;">
+        <button class="header-icon" id="toggle-hidden-btn" onclick="toggleShowHidden()" style="display:none;" aria-label="Show hidden trackers">
+          <i class="ti ti-eye-off" style="font-size:19px;"></i>
+        </button>
+        <span class="date" id="today-date"></span>
+      </div>
     </header>
     <div id="install-banner" class="install-banner">
       <span class="txt">Add Free to your home screen so it's one tap away.</span>
@@ -107,6 +112,11 @@
   <!-- ===================== KNOWLEDGE ===================== -->
   <div class="screen" id="screen-knowledge">
     <header class="top"><h1 class="serif">Knowledge</h1></header>
+    <div class="search-bar">
+      <i class="ti ti-search" style="font-size:16px;color:var(--text-faint);"></i>
+      <input type="text" id="knowledge-search" placeholder="Search any habit or addiction…" maxlength="60" onkeydown="if(event.key==='Enter'){searchCustomTopic();event.preventDefault();}">
+      <button class="btn primary" style="padding:8px 14px;font-size:13px;" onclick="searchCustomTopic()">Search</button>
+    </div>
     <div class="topic-chip-row" id="topic-chips"></div>
     <div id="article-list"></div>
   </div>
@@ -203,6 +213,16 @@
       <div class="modal-row">
         <label class="field-label">Streak started on</label>
         <input type="datetime-local" id="edit-tracker-start">
+      </div>
+      <div class="modal-row" style="display:flex;align-items:center;justify-content:space-between;">
+        <div>
+          <label class="field-label" style="margin-bottom:0;">Hide from dashboard</label>
+          <div style="font-size:12px;color:var(--text-faint);margin-top:2px;">Streak keeps running, just not visible by default</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="edit-tracker-hidden">
+          <span class="toggle-slider"></span>
+        </label>
       </div>
       <div class="modal-actions">
         <button class="btn ghost" onclick="closeModal('modal-edit-tracker')">Cancel</button>
