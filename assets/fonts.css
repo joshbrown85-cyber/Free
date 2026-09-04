@@ -1,4 +1,4 @@
-/* Self-hosted variable fonts (weight axis) so the app renders correctly offline. */
+/* Self-hosted fonts so the app renders correctly with no network connection. */
 
 @font-face {
   font-family: 'Fraunces';
@@ -14,4 +14,20 @@
   font-display: swap;
   font-weight: 100 900;
   src: url('fonts/inter-wght.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('fonts/jetbrains-mono-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('fonts/jetbrains-mono-500.woff2') format('woff2');
 }

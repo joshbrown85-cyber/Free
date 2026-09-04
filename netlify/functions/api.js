@@ -49,6 +49,9 @@ exports.handler = async (event) => {
 
   const action = event.queryStringParameters && event.queryStringParameters.action;
 
+  if (action === 'search') {
+    return handleSearch(event);
+  }
   if (action === 'knowledge') {
     return handleKnowledge(event);
   }
@@ -65,6 +68,96 @@ exports.handler = async (event) => {
     body: JSON.stringify({ error: 'Unknown action' })
   };
 };
+
+// ---- SEARCH: free-text article lookup for the redesigned Learn tab ----
+// Returns { results: [{ source, minutes, title, summary, url }] } — the shape
+// app.js expects. Brave for retrieval, Claude to curate and format.
+
+async function handleSearch(event) {
+  const q = ((event.queryStringParameters && event.queryStringParameters.q) || '').trim();
+  if (!q) {
+    return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Missing query' }) };
+  }
+
+  try {
+    const queries = [q, `${q} evidence-based coping strategies`];
+    const settled = await Promise.allSettled(queries.map(braveSearch));
+
+    const raw = [];
+    const seen = new Set();
+    for (const s of settled) {
+      if (s.status !== 'fulfilled') continue;
+      const web = s.value && s.value.web && s.value.web.results;
+      if (!web) continue;
+      for (const r of web) {
+        let domain = '';
+        try { domain = new URL(r.url).hostname.replace('www.', ''); } catch (e) {}
+        if (seen.has(domain)) continue;
+        seen.add(domain);
+        raw.push({ title: r.title || '', description: r.description || '', url: r.url || '' });
+      }
+    }
+
+    if (raw.length === 0) {
+      return { statusCode: 200, headers: CORS, body: JSON.stringify({ results: [] }) };
+    }
+
+    if (ANTHROPIC_KEY) {
+      try {
+        const results = await curateSearchWithClaude(raw.slice(0, 12), q);
+        return { statusCode: 200, headers: CORS, body: JSON.stringify({ results }) };
+      } catch (e) {
+        console.error('Search curation failed, returning raw:', e.message);
+      }
+    }
+
+    const results = raw.slice(0, 6).map(r => ({
+      source: hostname(r.url),
+      minutes: estMinutes(r.description),
+      title: r.title,
+      summary: r.description,
+      url: r.url
+    }));
+    return { statusCode: 200, headers: CORS, body: JSON.stringify({ results }) };
+
+  } catch (e) {
+    console.error('Search handler error:', e);
+    return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: 'Search failed' }) };
+  }
+}
+
+function hostname(u) { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return 'Web'; } }
+function estMinutes(t) { return Math.max(3, Math.round(((t || '').split(/\s+/).length) / 30) + 3); }
+
+async function curateSearchWithClaude(results, query) {
+  const body = {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 1600,
+    messages: [{
+      role: 'user',
+      content: `Someone searching a private recovery app looked up: "${query}".
+
+Search results to evaluate:
+${JSON.stringify(results, null, 2)}
+
+Pick the 4-7 most useful, credible results for someone actively trying to change a habit or addiction. Prefer medical bodies, research institutions and established recovery organisations; skip ads, product pages and clickbait; compassionate framing only.
+
+Respond ONLY with a JSON array, no other text. Each item:
+- "source": short publisher name (e.g. "NHS", "Harvard Health", "NIDA")
+- "minutes": estimated read time in minutes (integer, 3-12)
+- "title": the article title, cleaned up
+- "summary": one or two plain sentences on what the reader gets — source and length matter more than hype
+- "url": the original URL`
+    }]
+  };
+  const response = await callClaude(body);
+  const text = response.content && response.content[0] && response.content[0].text;
+  if (!text) throw new Error('Empty Claude response');
+  const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  const arr = JSON.parse(clean);
+  if (!Array.isArray(arr)) throw new Error('Claude did not return an array');
+  return arr;
+}
 
 async function handleKnowledge(event) {
   const topic = (event.queryStringParameters.topic || 'general').toLowerCase();

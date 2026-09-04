@@ -1,65 +1,73 @@
 # Free
 
-A private, on-device PWA for tracking recovery streaks and getting through cravings in the moment.
+A private, on-device PWA for tracking abstinence streaks and getting through cravings in the moment.
 
 ## What it does
 
-- **Today** — tracks multiple habits/addictions at once, each with its own running streak ("time since last reset")
-- **Reasons** — a private space to write down why quitting each thing matters to you, so it's there to read mid-craving
-- **Right now** — in-the-moment tools for urges: guided breathing, a 10-minute delay timer, a tap-it-out fidget exercise, and short reframing lines
-- **Learn** — curated reading on habit change and specific addictions, filterable by topic
+The home screen **asks one question a day** and answering it is the whole interaction — it never asks the same question two days running, and if there's nothing worth asking it just holds the numbers. Those answers are what let the app learn which days are hard and warn you in the morning instead of reacting at 9pm.
+
+- **Check-in (home)** — one of five questions: difficulty ("how hard does today feel?"), trigger (the morning after a rough day), the plan (the morning of a known-hard day), the week (Sundays), or a milestone question at 30 / 100 / 365 days. Skipping is always allowed; three skips in a row and it pauses for a week.
+- **Craving sheet** — pinned under your thumb on every screen. One recommended action plus a quiet list: guided breathing, a 10-minute delay timer, a tap-it-out exercise, your reasons, or a quick note.
+- **Reasons** — your own writing, set large, filtered per tracker — there to read mid-craving.
+- **Tracker detail** — every run as a bar you can read against the others, your notes in date order, and reset-the-clock as a line of text (never a button).
+- **Learn** — opens with something tied to what you logged this week; free-text search of habit/addiction reading, saved articles cached for offline.
+- **Settings** — add / rename / hide / reorder trackers, check-in preferences, and export.
 
 ## Data & privacy
 
-All data is stored locally on your device using IndexedDB. There is no backend, no account, no analytics, and no sync between devices. Uninstalling the app (or clearing site data) deletes everything — there's no recovery, so this is intentionally a single-device, fully private tool for now.
+All data is stored locally using IndexedDB. No backend, no account, no analytics, no sync. The **only** network request the app ever makes is Learn's article search; it degrades gracefully to an offline screen when it fails, and the copy says so in two places. Uninstalling the app (or clearing site data) deletes everything — export first if you want a backup.
+
+### Data model
+
+Beyond trackers / reasons / notes, three concepts drive the check-in:
+
+- **`checkins`** — one record per day (`date`, `question`, `answer`, `skipped`). The 14-day history strip, the "which weekday is hardest" claim (needs ~10 answered days), hard-day detection and the week counts are all derived from this.
+- **`triggers`** — a single shared trigger vocabulary (`label`, `count`, `lastUsed`), referenced by id from notes and check-in answers. Chips everywhere are drawn from this list, which is what makes "you logged work stress 3 times" possible — free text can't be counted.
+- **`plans`** — written by the plan question in the morning, read back by the craving sheet that evening.
+
+Legacy v1 data (the old four-tab app) is migrated automatically on first load: streak history becomes per-tracker runs, journal entries become notes with trigger-vocabulary rows, colours map to the new four-swatch set.
 
 ## Running locally
 
-This is a static site with no build step. Any static file server works, e.g.:
-
-```bash
-npx serve .
-```
-
-or
+Static site, no build step:
 
 ```bash
 python3 -m http.server 8000
 ```
 
-Then visit `http://localhost:8000` (or whatever port your server uses).
+Then visit `http://localhost:8000`. Service workers require `https://` or `localhost`.
 
-Note: service workers require either `https://` or `localhost` — file:// won't work for offline support, though the rest of the app will still function.
+Learn's search calls `/.netlify/functions/api?action=search` (Brave + Claude); it needs `BRAVE_API_KEY` and `ANTHROPIC_API_KEY` set on Netlify. Everything else works with no function and no network.
 
 ## Deploying
 
-Deploy as a static site (Netlify, Vercel, GitHub Pages, etc.) — no build command needed, the publish directory is the repo root.
+Deploy as a static site (Netlify — the `netlify/functions` directory is picked up automatically). Publish directory is the repo root, no build command.
 
 ## Installing on your phone
 
 Once deployed to a live HTTPS URL:
 - **iOS (Safari)**: open the URL → Share → Add to Home Screen
-- **Android (Chrome)**: open the URL → you should see an automatic install banner, or use the menu → Install app
+- **Android (Chrome)**: install banner, or menu → Install app
 
 ## Project structure
 
 ```
 free/
-├── index.html      — app shell + markup for all four screens
-├── style.css       — all styling
-├── app.js          — app logic (rendering, state, exercises)
-├── db.js           — small IndexedDB wrapper used as the storage layer
-├── sw.js           — service worker for offline app-shell caching
+├── index.html      — app shell (a single #app the script renders into)
+├── style.css       — all styling; design tokens at the top
+├── app.js          — state, check-in logic, every screen and sheet
+├── db.js           — IndexedDB key/value wrapper
+├── sw.js           — service worker, app-shell cache
 ├── manifest.json   — PWA manifest
-├── assets/         — self-hosted fonts (Fraunces, Inter) and Tabler icon webfont
-├── icons/          — app icons (standard + maskable, 192/512px)
-└── make_icons.py   — script used to generate the icons (not needed at runtime)
+├── assets/fonts/   — self-hosted Fraunces, Inter, JetBrains Mono (woff2)
+├── icons/          — app icons
+└── netlify/functions/api.js — Learn search + the older knowledge/quotes endpoints
 ```
 
-Fonts and icons are self-hosted under `assets/` rather than loaded from a CDN, so the app renders correctly with no network connection once installed. There are no external runtime dependencies.
+Fonts are self-hosted so the app renders correctly with no network once installed. There are no other external runtime dependencies. The redesign uses no icons — text, shapes and CSS gradients only.
 
 ## Roadmap ideas
 
-- Cross-device sync (e.g. Google Drive, similar to the ko.ah project)
-- Edit existing trackers (rename, change color, change start date) rather than only add/delete
-- Export reasons/history as a backup file
+- Cross-device sync
+- Notification for the morning check-in reminder (the `askAt` setting is stored but not yet wired to a notification)
+- Richer Learn article reader (full text caching for saved results)
