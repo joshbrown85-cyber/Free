@@ -61,6 +61,35 @@ const REASON_PROMPTS = [
 
 const PATTERN_THRESHOLD = 10; // answered check-ins before the app claims a hard weekday
 
+// "A reminder" — a line to sit with mid-craving. Curated pool, held on
+// device; the craving overlay also mixes in the user's own written reasons.
+const REMINDERS = [
+  { t: 'It is not that we have a short time to live, but that we waste a great deal of it.', a: 'Seneca' },
+  { t: 'You have power over your mind, not outside events. Realize this, and you will find strength.', a: 'Marcus Aurelius' },
+  { t: 'No man is free who is not master of himself.', a: 'Epictetus' },
+  { t: 'How long are you going to wait before you demand the best for yourself?', a: 'Epictetus' },
+  { t: 'The wound is the place where the light enters you.', a: 'Rumi' },
+  { t: 'Yesterday I was clever, so I wanted to change the world. Today I am wise, so I am changing myself.', a: 'Rumi' },
+  { t: 'He who has a why to live can bear almost any how.', a: 'Viktor Frankl' },
+  { t: 'Between stimulus and response there is a space. In that space is our freedom and our power to choose.', a: 'Viktor Frankl' },
+  { t: "Recovery is not a race. You don't have to feel guilty if it takes you longer than you thought it would.", a: '—' },
+  { t: 'The only person you are destined to become is the person you decide to be.', a: 'Ralph Waldo Emerson' },
+  { t: 'Not everything that is faced can be changed, but nothing can be changed until it is faced.', a: 'James Baldwin' },
+  { t: 'I am not what happened to me. I am what I choose to become.', a: 'Carl Jung' },
+  { t: "The most common way people give up their power is by thinking they don't have any.", a: 'Alice Walker' },
+  { t: 'Nothing is permanent. This too shall pass.', a: '—' },
+  { t: 'You are the sky. Everything else is just the weather.', a: 'Pema Chödrön' },
+  { t: 'The only way out is through.', a: 'Robert Frost' },
+  { t: 'You are not your craving. You are the one noticing it.', a: '—' },
+  { t: 'This feeling is real, but it is not a fact about what you must do next.', a: '—' },
+  { t: "Every craving you've ever had has ended, whether or not you acted on it.", a: '—' },
+  { t: "The urge is loud because it's temporary. Permanent things don't need to shout.", a: '—' },
+  { t: "You don't have to win the whole fight right now. Just win the next ten minutes.", a: '—' },
+  { t: 'Discomfort you choose to sit with is not the same as harm.', a: '—' },
+  { t: 'What you feed grows. What you starve, even briefly, weakens.', a: '—' },
+  { t: 'Future you is waiting on the other side of this exact moment.', a: '—' }
+];
+
 // ---- persisted store + ephemeral ui state -------------------------
 
 const S = {
@@ -1138,6 +1167,7 @@ function renderLayer() {
   if (L === 'breathe') return renderBreatheOverlay();
   if (L === 'timer') return renderTimerOverlay();
   if (L === 'tap') return renderTapOverlay();
+  if (L === 'reminder') return renderReminderOverlay();
   if (L === 'slip') return renderSlipOverlay();
   return '';
 }
@@ -1188,6 +1218,7 @@ function renderCravingSheet() {
       <button class="quiet-row p-tap" onclick="cravingToReasons()"><span class="lbl">Read your ${nReasons} reason${nReasons === 1 ? '' : 's'}</span><span class="dur">1 min</span></button>
       <button class="quiet-row p-tap" onclick="startTimer()"><span class="lbl">Set a 10-minute delay</span><span class="dur">10 min</span></button>
       <button class="quiet-row p-tap" onclick="startTap()"><span class="lbl">Tap it out</span><span class="dur">for your hands</span></button>
+      <button class="quiet-row p-tap" onclick="startReminder()"><span class="lbl">A line to sit with</span><span class="dur">a moment</span></button>
       <button class="quiet-row p-tap" onclick="cravingToNote()"><span class="lbl">Write down what set this off</span><span class="dur">2 min</span></button>
     </div>
     <div class="link-quiet p-tap" onclick="closeLayer()" style="padding-bottom:4px">It passed — close this</div>
@@ -1357,6 +1388,23 @@ function renderTapOverlay() {
     </button>
     <div class="instruction">No score. This is just for your hands.</div>
     <button class="done p-tap" onclick="closeLayer()">I'm done</button>
+  </div>`;
+}
+
+function renderReminderOverlay() {
+  const q = ui.reminder || (ui.reminder = pickReminder());
+  const attribution = q.a === 'your own words'
+    ? 'your own words'
+    : (q.a && q.a !== '—') ? '— ' + q.a : 'sit with this one';
+  return `<div class="overlay center" style="width:100%;max-width:440px">
+    <div class="reminder-block">
+      <div class="reminder-quote">${esc(q.t)}</div>
+      <div class="reminder-src">${esc(attribution)}</div>
+    </div>
+    <div class="stack">
+      <button class="timer-btn p-tap" onclick="anotherReminder()">Another</button>
+      <button class="done faint p-tap" onclick="closeLayer()">I'm done</button>
+    </div>
   </div>`;
 }
 
@@ -1700,6 +1748,17 @@ function doTap() {
   }
 }
 
+let _lastReminderText = null;
+function pickReminder() {
+  const pool = REMINDERS.concat(S.reasons.map(r => ({ t: r.text, a: 'your own words' })));
+  const choices = pool.length > 1 ? pool.filter(q => q.t !== _lastReminderText) : pool;
+  const q = choices[Math.floor(Math.random() * choices.length)] || pool[0];
+  _lastReminderText = q.t;
+  return q;
+}
+function startReminder() { stopClocks(); ui.layer = 'reminder'; ui.reminder = pickReminder(); render(); }
+function anotherReminder() { ui.reminder = pickReminder(); render(); }
+
 // ---- note / reason sheets -------------------
 
 function openNoteSheet(trackerId) { stopClocks(); ui.draft = { trackerId }; ui.layer = 'note'; ui._focusId = null; render(); }
@@ -1982,6 +2041,7 @@ Object.assign(window, {
   saveTriggerAnswer, triggerWriteInstead, pickPlan, savePlan, noPlanToday, weekAnswer,
   saveMilestone, skipMilestone, setReasonsFilter, deleteReason,
   cravingToReasons, cravingToNote, startBreathing, startTimer, toggleTimer, startTap, doTap,
+  startReminder, anotherReminder,
   openNoteSheet, noteTrigger, saveNote, openReasonSheet, cycleReasonPrompt, saveReason,
   openTrackerSheet, trackRowClick, trName, trColor, trToggleHidden, saveTracker, deleteTracker,
   openReset, confirmReset, slipTrigger, saveSlipTrigger, closeSlip,

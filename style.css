@@ -960,6 +960,25 @@ p, div { text-wrap: pretty; }
 .tap-circle .n { font-family: var(--serif); font-weight: 300; font-size: 52px; line-height: 1; color: var(--accent-pale); font-variant-numeric: tabular-nums; }
 .tap-circle .l { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-dim); font-family: var(--mono); }
 
+/* a reminder */
+.reminder-block { display: flex; flex-direction: column; align-items: center; gap: 20px; max-width: 300px; text-align: center; }
+.reminder-quote {
+  font-family: var(--serif);
+  font-weight: 300;
+  font-size: 27px;
+  line-height: 1.32;
+  letter-spacing: -.01em;
+  color: var(--text);
+  text-wrap: pretty;
+}
+.reminder-src {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
 /* milestone / slip full screens */
 .big-num-block { display: flex; flex-direction: column; gap: 6px; }
 .big-num-block .row { display: flex; align-items: flex-end; gap: 11px; }
