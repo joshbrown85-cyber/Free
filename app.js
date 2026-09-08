@@ -10,9 +10,12 @@
      trackers   [{ id, name, color, start, best, runs:[{endedOn,length}], hidden, order }]
      reasons    [{ id, trackerId, text, writtenAt, source }]
      notes      [{ id, trackerId, triggerId|null, text, createdAt }]
-     checkins   [{ date:'YYYY-MM-DD', question, answer, skipped, at, trackerId?, milestoneN? }]
+     checkins   [{ date:'YYYY-MM-DD', question, answer, skipped, at, trackerId, milestoneN? }]
+                  difficulty: one row per visible tracker per day (trackerId set)
+                  trigger/plan/milestone: one row/day, trackerId names the tracker it's about
+                  week/skip: one row/day, trackerId null
      triggers   [{ id, label, count, lastUsed }]
-     plans      [{ date:'YYYY-MM-DD', choice, custom }]
+     plans      [{ date:'YYYY-MM-DD', trackerId, choice, custom }]
      articles   [{ id, title, source, minutes, summary, url, savedAt, body }]
      searches   [{ id, query, keptAt }]
      settings   { askAt, hardDayReminders, milestoneQuestions, onboarded }
@@ -23,7 +26,7 @@
 'use strict';
 
 const DAY = 86400000;
-const SCHEMA = 2;
+const SCHEMA = 3;
 
 const SWATCHES = ['#7fc3ac', '#8fb3d9', '#d9a86c', '#c48f8f'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -169,8 +172,19 @@ async function migrate() {
   }
 
   if (S.trackers.length) S.settings.onboarded = true;
+
+  // v2 -> v3: check-ins and plans become per-tracker. Blended history is
+  // assigned to the first visible tracker (the one it was most likely about).
+  if ((S.schemaVersion || 0) < 3) {
+    const primary = (visibleTrackers()[0] || S.trackers[0] || {}).id || null;
+    S.checkins.forEach(c => {
+      if (c.trackerId == null && c.question === 'difficulty') c.trackerId = primary;
+    });
+    S.plans.forEach(p => { if (p.trackerId == null) p.trackerId = primary; });
+  }
+
   S.schemaVersion = SCHEMA;
-  await persist('schemaVersion', 'trackers', 'reasons', 'notes', 'triggers', 'searches', 'settings');
+  await persist('schemaVersion', 'trackers', 'reasons', 'notes', 'checkins', 'plans', 'triggers', 'searches', 'settings');
 }
 
 // ---- small helpers -------------------------------------------
@@ -216,51 +230,77 @@ function sortedTriggers() {
 }
 
 // ---- check-in derivations -----------------------------------
+// Check-ins are per visible tracker: the difficulty question records one row
+// per tracker per day. The specialised questions (trigger/plan/week/milestone)
+// still fire at most once a day, each about one tracker.
 
-function checkinOn(date) { return S.checkins.find(c => c.date === date); }
-function todayCheckin() { return checkinOn(todayYMD()); }
-function yesterdayCheckin() { return checkinOn(shiftYMD(-1)); }
-function answeredCount() { return S.checkins.filter(c => !c.skipped).length; }
+function checkinsOn(date) { return S.checkins.filter(c => c.date === date); }
+function difficultyOn(date, trackerId) {
+  return S.checkins.find(c => c.date === date && c.question === 'difficulty' && c.trackerId === trackerId && !c.skipped);
+}
+function specialOn(date) {
+  return S.checkins.find(c => c.date === date && ['trigger', 'plan', 'week', 'milestone'].indexOf(c.question) >= 0);
+}
+function skippedOn(date) { return S.checkins.some(c => c.date === date && c.skipped); }
+
+function yesterdayQuestionType() {
+  const rows = checkinsOn(shiftYMD(-1));
+  const sp = rows.find(c => ['trigger', 'plan', 'week', 'milestone'].indexOf(c.question) >= 0);
+  if (sp) return sp.question;
+  if (rows.some(c => c.question === 'difficulty' && !c.skipped)) return 'difficulty';
+  if (rows.some(c => c.skipped)) return 'skip';
+  return null;
+}
+
+function answeredCount(trackerId) {
+  return S.checkins.filter(c => !c.skipped && c.question === 'difficulty'
+    && (trackerId ? c.trackerId === trackerId : true)).length;
+}
 function questionsPaused() { return S.skipInfo.pausedUntil && todayYMD() < S.skipInfo.pausedUntil; }
 
-function history14() {
+// Has the day's whole check-in been dealt with?
+function todaysQuestionDone() {
+  const today = todayYMD();
+  if (skippedOn(today) || specialOn(today)) return true;
+  const vis = visibleTrackers();
+  return vis.length > 0 && vis.every(t => difficultyOn(today, t.id));
+}
+
+function history14(trackerId) {
   const out = [];
   for (let i = 13; i >= 0; i--) {
-    const c = checkinOn(shiftYMD(-i));
-    if (c && !c.skipped && c.question === 'difficulty') {
-      if (c.answer === 'rough') out.push({ h: '100%', c: 'var(--chart-hi)' });
-      else if (c.answer === 'manageable') out.push({ h: '65%', c: 'var(--chart-mid)' });
-      else out.push({ h: '30%', c: 'var(--chart-lo)' });
-    } else {
-      out.push({ h: '12%', c: 'var(--chart-lo)' });
-    }
+    const c = difficultyOn(shiftYMD(-i), trackerId);
+    if (c && c.answer === 'rough') out.push({ h: '100%', c: 'var(--chart-hi)' });
+    else if (c && c.answer === 'manageable') out.push({ h: '65%', c: 'var(--chart-mid)' });
+    else if (c) out.push({ h: '30%', c: 'var(--chart-lo)' });
+    else out.push({ h: '12%', c: 'var(--chart-lo)' });
   }
   return out;
 }
 
-function patternInfo() {
-  const answeredDifficulty = S.checkins.filter(c => !c.skipped && c.question === 'difficulty');
-  if (answeredDifficulty.length < PATTERN_THRESHOLD) return { claim: null, weekday: null };
+function patternInfo(trackerId) {
+  const answered = S.checkins.filter(c => !c.skipped && c.question === 'difficulty' && c.trackerId === trackerId);
+  if (answered.length < PATTERN_THRESHOLD) return { claim: null, weekday: null };
   const tally = [0, 0, 0, 0, 0, 0, 0];
-  answeredDifficulty.filter(c => c.answer === 'rough').forEach(c => {
-    tally[new Date(c.date + 'T12:00').getDay()]++;
-  });
+  answered.filter(c => c.answer === 'rough').forEach(c => { tally[new Date(c.date + 'T12:00').getDay()]++; });
   let max = 0, idx = -1;
   tally.forEach((n, i) => { if (n > max) { max = n; idx = i; } });
   if (max < 2) return { claim: null, weekday: null };
   return { claim: WD[idx] + 's are hardest', weekday: idx };
 }
 
-function hardWeekdayToday() {
-  const p = patternInfo();
+function hardWeekdayToday(trackerId) {
+  const p = patternInfo(trackerId);
   return (p.weekday !== null && p.weekday === new Date().getDay()) ? p.weekday : null;
 }
 
-function resetRecently() {
-  return S.lastReset && (Date.now() - S.lastReset.at < DAY);
+function resetRecently(trackerId) {
+  return S.lastReset && S.lastReset.trackerId === trackerId && (Date.now() - S.lastReset.at < DAY);
 }
 
-function planToday() { return S.plans.find(p => p.date === todayYMD()); }
+function planToday(trackerId) {
+  return S.plans.find(p => p.date === todayYMD() && (trackerId ? p.trackerId === trackerId : true));
+}
 
 function weekNumber() {
   if (!S.trackers.length) return 1;
@@ -268,25 +308,26 @@ function weekNumber() {
   return Math.max(1, Math.floor((Date.now() - earliest) / (7 * DAY)) + 1);
 }
 
-function weekCounts() {
+function weekCounts(trackerId) {
   let easy = 0, manageable = 0, rough = 0;
   for (let i = 0; i < 7; i++) {
-    const c = checkinOn(shiftYMD(-i));
-    if (!c || c.skipped || c.question !== 'difficulty') continue;
+    const c = difficultyOn(shiftYMD(-i), trackerId);
+    if (!c) continue;
     if (c.answer === 'easy') easy++;
     else if (c.answer === 'manageable') manageable++;
     else if (c.answer === 'rough') rough++;
   }
   const cutoff = Date.now() - 7 * DAY;
+  const t = trackerById(trackerId);
   let resets = 0;
-  S.trackers.forEach(t => (t.runs || []).forEach(r => { if (new Date(r.endedOn).getTime() >= cutoff) resets++; }));
+  if (t) (t.runs || []).forEach(r => { if (new Date(r.endedOn).getTime() >= cutoff) resets++; });
   return { easy, manageable, rough, resets };
 }
 
 function recentNoteThisWeek() {
   const cutoff = Date.now() - 7 * DAY;
   return S.notes
-    .filter(n => new Date(n.createdAt).getTime() >= cutoff)
+    .filter(n => !n.auto && new Date(n.createdAt).getTime() >= cutoff)
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0] || null;
 }
 
@@ -305,23 +346,39 @@ function milestonePending() {
 // Which question to show, or null for the quiet summary.
 function pickQuestion() {
   if (!S.trackers.length) return null;
-  if (todayCheckin() || questionsPaused()) return null;
+  const vis = visibleTrackers();
+  if (!vis.length) return null;
+  if (questionsPaused() || todaysQuestionDone()) return null;
 
+  const yType = yesterdayQuestionType();
+
+  // milestone — a tracker that crossed 30 / 100 / 365 today
   const ms = milestonePending();
   if (ms) return { type: 'milestone', trackerId: ms.trackerId, n: ms.n };
 
-  const yType = (yesterdayCheckin() || {}).question;
-  const y = yesterdayCheckin();
+  // trigger — a tracker that was rough yesterday, or reset within a day
+  if (yType !== 'trigger') {
+    for (const t of vis) {
+      const y = difficultyOn(shiftYMD(-1), t.id);
+      if ((y && y.answer === 'rough') || resetRecently(t.id)) {
+        return { type: 'trigger', trackerId: t.id };
+      }
+    }
+  }
 
-  if (((y && !y.skipped && y.answer === 'rough') || resetRecently()) && yType !== 'trigger') {
-    return { type: 'trigger' };
+  // the plan — a tracker whose own history flags today as hard
+  if (yType !== 'plan' && S.settings.hardDayReminders) {
+    for (const t of vis) {
+      if (hardWeekdayToday(t.id) !== null && answeredCount(t.id) >= PATTERN_THRESHOLD) {
+        return { type: 'plan', trackerId: t.id };
+      }
+    }
   }
-  if (S.settings.hardDayReminders && hardWeekdayToday() !== null && answeredCount() >= PATTERN_THRESHOLD && yType !== 'plan') {
-    return { type: 'plan' };
-  }
-  if (new Date().getDay() === 0 && yType !== 'week') {
-    return { type: 'week' };
-  }
+
+  // the week — Sunday
+  if (new Date().getDay() === 0 && yType !== 'week') return { type: 'week' };
+
+  // difficulty — asked for every visible tracker on one screen
   return { type: 'difficulty' };
 }
 
@@ -357,9 +414,9 @@ function statusbar(right, onRight) {
 }
 function nowClock() { return fmtTime(new Date()).replace(/(am|pm)$/, ''); }
 
-function pinnedBar() {
+function pinnedBar(trackerId) {
   return `<div class="pinned">
-    <button class="craving p-tap" onclick="openCraving()">Craving right now</button>
+    <button class="craving p-tap" onclick="openCraving(${trackerId ? `'${trackerId}'` : ''})">Craving right now</button>
     <button class="help p-tap" onclick="go('learn')" aria-label="Learn">?</button>
   </div>`;
 }
@@ -368,45 +425,28 @@ function pinnedBar() {
 
 function renderHome() {
   const q = pickQuestion();
+  ui._q = q;
   if (q && q.type === 'milestone') return renderMilestoneScreen(q);
 
   const dateLabel = WD_SHORT[new Date().getDay()] + ' ' + fmtDayMon(new Date());
-  let body = '';
-
-  if (q) {
-    body = renderQuestion(q);
-  } else {
-    body = renderQuietSummary();
-  }
+  const body = q ? renderQuestion(q) : renderQuietSummary();
 
   return `
     ${statusbar({ text: dateLabel }, 'go(\'settings\')')}
     <div class="scroll pad">
       ${body}
-      ${q && q.type === 'milestone' ? '' : renderHomeLower(q)}
+      ${renderHomeLower(q)}
     </div>
     ${pinnedBar()}
   `;
 }
 
 function renderQuestion(q) {
-  if (q.type === 'difficulty') {
-    return `
-      <div class="checkin-head">
-        <div class="kicker">${answeredCount() === 0 ? 'First check-in' : 'Morning check-in'}</div>
-        <h2 class="q-title">How hard does today feel?</h2>
-      </div>
-      <div class="answers">
-        ${DIFFICULTY_OPTS.map(o => `
-          <button class="answer-row p-tap" onclick="answerDifficulty('${o.key}')">
-            <span class="dot"></span><span class="lbl">${esc(o.label)}</span>
-          </button>`).join('')}
-      </div>
-      <div class="skip-link p-tap" onclick="skipToday('difficulty')">Skip today</div>
-    `;
-  }
+  if (q.type === 'difficulty') return renderDifficulty();
 
   if (q.type === 'trigger') {
+    const t = trackerById(q.trackerId);
+    const many = visibleTrackers().length > 1;
     const sel = ui.draft.trigger || null;
     const chips = sortedTriggers().map(v => `
       <button class="chip p-tap ${sel === v.id ? 'sel' : ''}" onclick="pickTriggerChip('${v.id}')">${esc(v.label)}</button>`).join('');
@@ -415,19 +455,22 @@ function renderQuestion(q) {
       : `<button class="chip add p-tap" onclick="openCustomTrigger()">+ something else</button>`;
     return `
       <div class="checkin-head">
-        <div class="kicker">Yesterday was rough</div>
+        <div class="kicker">${many && t ? esc(t.name) + ' — yesterday was rough' : 'Yesterday was rough'}</div>
         <h2 class="q-title">What was going on?</h2>
       </div>
       <div class="chips">${chips}${custom}</div>
       <div class="q-actions">
         <button class="btn-primary p-tap" onclick="saveTriggerAnswer()">Save</button>
         <div class="link-quiet p-tap" onclick="triggerWriteInstead()">Rather write it out</div>
-        <div class="link-quiet p-tap" onclick="skipToday('trigger')">Skip today</div>
+        <div class="link-quiet p-tap" onclick="skipToday()">Skip today</div>
       </div>
     `;
   }
 
   if (q.type === 'plan') {
+    const t = trackerById(q.trackerId);
+    const many = visibleTrackers().length > 1;
+    const claim = patternInfo(q.trackerId).claim || 'Today tends to be hard';
     const sel = ui.draft.plan;
     const opts = PLAN_OPTS.map((o, i) => `
       <button class="opt-row p-tap ${sel === i ? 'sel' : ''}" onclick="pickPlan(${i})">${esc(o)}</button>`).join('');
@@ -436,21 +479,27 @@ function renderQuestion(q) {
       : `<button class="opt-row add p-tap" onclick="pickPlan('other')">Something else…</button>`;
     return `
       <div class="checkin-head">
-        <div class="kicker">${esc(patternInfo().claim || 'Today tends to be hard')}</div>
+        <div class="kicker">${many && t ? esc(t.name) + ': ' : ''}${esc(claim)}</div>
         <h2 class="q-title">What's the plan for tonight?</h2>
       </div>
       <div class="answers">${opts}${other}</div>
       <div class="q-actions">
         <button class="btn-primary p-tap" onclick="savePlan()">Lock it in</button>
         <button class="btn-outline p-tap" onclick="noPlanToday()">No plan today</button>
-        <div class="link-quiet p-tap" onclick="skipToday('plan')">Skip today</div>
+        <div class="link-quiet p-tap" onclick="skipToday()">Skip today</div>
       </div>
     `;
   }
 
   if (q.type === 'week') {
-    const w = weekCounts();
-    const statement = `${cap(numWord(w.easy))} easy day${w.easy === 1 ? '' : 's'}, ${numWord(w.rough)} rough, ${w.resets === 0 ? 'no resets' : numWord(w.resets) + ' reset' + (w.resets === 1 ? '' : 's')}.`;
+    const vis = visibleTrackers();
+    const many = vis.length > 1;
+    const lines = vis.map(t => {
+      const w = weekCounts(t.id);
+      const resets = w.resets === 0 ? (many ? '' : ', no resets') : ', ' + numWord(w.resets) + ' reset' + (w.resets === 1 ? '' : 's');
+      const body = `${cap(numWord(w.easy))} easy day${w.easy === 1 ? '' : 's'}, ${numWord(w.rough)} rough${resets}.`;
+      return many ? `${esc(t.name)}: ${body}` : body;
+    });
     const note = recentNoteThisWeek();
     const noteCard = note ? `
       <div class="week-card">
@@ -460,7 +509,7 @@ function renderQuestion(q) {
     return `
       <div class="checkin-head">
         <div class="kicker">Week ${weekNumber()}</div>
-        <div class="week-statement">${esc(statement)}</div>
+        <div class="week-statement">${lines.map(l => esc(l)).join('<br>')}</div>
       </div>
       ${noteCard ? `<div style="margin-top:20px">${noteCard}</div>` : ''}
       ${note ? `<div class="week-follow" style="margin-top:22px">Keep this where you'll see it during the next craving?</div>` : ''}
@@ -469,11 +518,56 @@ function renderQuestion(q) {
           <button class="btn-outline p-tap" onclick="weekAnswer(false)">No</button>
           <button class="btn-primary p-tap" style="flex:1.4" onclick="weekAnswer(true)">Keep it</button>
         </div>` : `<button class="btn-primary p-tap" onclick="weekAnswer(false)">Done for the week</button>`}
-        <div class="link-quiet p-tap" onclick="skipToday('week')">Skip today</div>
+        <div class="link-quiet p-tap" onclick="skipToday()">Skip today</div>
       </div>
     `;
   }
   return '';
+}
+
+function renderDifficulty() {
+  const vis = visibleTrackers();
+  const today = todayYMD();
+  const kicker = answeredCount() === 0 ? 'First check-in' : 'Morning check-in';
+
+  if (vis.length === 1) {
+    const t = vis[0];
+    const cur = (difficultyOn(today, t.id) || {}).answer;
+    return `
+      <div class="checkin-head">
+        <div class="kicker">${kicker}</div>
+        <h2 class="q-title">How hard does today feel?</h2>
+      </div>
+      <div class="answers">
+        ${DIFFICULTY_OPTS.map(o => `
+          <button class="answer-row p-tap ${cur === o.key ? 'sel' : ''}" onclick="setDifficulty('${t.id}','${o.key}')">
+            <span class="dot"></span><span class="lbl">${esc(o.label)}</span>
+          </button>`).join('')}
+      </div>
+      <div class="skip-link p-tap" onclick="skipToday()">Skip today</div>
+    `;
+  }
+
+  const rows = vis.map(t => {
+    const cur = (difficultyOn(today, t.id) || {}).answer;
+    return `
+      <div class="tc-block">
+        <div class="tc-name"><span class="cdot" style="background:${esc(t.color)}"></span>${esc(t.name)}</div>
+        <div class="tc-opts">
+          ${[['easy', 'Easy'], ['manageable', 'Manageable'], ['rough', 'Rough']].map(([k, lbl]) => `
+            <button class="tc-opt p-tap ${cur === k ? 'sel' : ''}" onclick="setDifficulty('${t.id}','${k}')">${lbl}</button>`).join('')}
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="checkin-head">
+      <div class="kicker">${kicker}</div>
+      <h2 class="q-title">How hard does today feel?</h2>
+    </div>
+    <div class="tc-list">${rows}</div>
+    <div class="skip-link p-tap" onclick="skipToday()">Skip today</div>
+  `;
 }
 
 function relDay(iso) {
@@ -484,15 +578,20 @@ function relDay(iso) {
 }
 
 function renderQuietSummary() {
-  const paused = questionsPaused();
-  const tc = todayCheckin();
+  const vis = visibleTrackers();
+  if (!vis.length) {
+    return `<div class="summary-note" style="margin-top:40px">Every tracker is hidden right now. Open Settings to bring one back into the daily check-in.</div>`;
+  }
+  const today = todayYMD();
+  const anyRough = vis.some(t => (difficultyOn(today, t.id) || {}).answer === 'rough');
   let noteText;
-  if (paused) noteText = "Paused the questions for a week — you skipped a few. It'll ask again after that.";
-  else if (tc && !tc.skipped && tc.answer === 'rough') noteText = "You said today feels rough. Nothing else to do here; the craving button is there if it turns.";
-  else if (tc && tc.skipped) noteText = "Skipped this morning. The app will ask again tomorrow.";
+  if (questionsPaused()) noteText = "Paused the questions for a week — you skipped a few. It'll ask again after that.";
+  else if (skippedOn(today)) noteText = "Skipped this morning. The app will ask again tomorrow.";
+  else if (specialOn(today)) noteText = "Checked in this morning. Nothing else to do here — the app will ask again tomorrow.";
+  else if (anyRough) noteText = "You said today feels rough. Nothing else to do here; the craving button is there if it turns.";
   else noteText = "Checked in this morning. Nothing else to do here — the app will ask again tomorrow.";
 
-  const rows = visibleTrackers().map(t => {
+  const rows = vis.map(t => {
     const d = daysSince(t.start);
     return `
       <button class="summary-row p-tap" onclick="openDetail('${t.id}')">
@@ -510,27 +609,33 @@ function renderQuietSummary() {
   `;
 }
 
-function renderHomeLower(q) {
-  const hist = history14();
-  const p = patternInfo();
-  const emptyHistory = answeredCount() < 3;
+function renderHomeLower() {
+  const vis = visibleTrackers();
+  if (!vis.length) return '';
+  const many = vis.length > 1;
 
-  const strip = emptyHistory
-    ? ''
-    : `
-      <div class="history-head">
-        <div class="kicker">Last 14 days</div>
-        <div class="pattern-note">${esc(p.claim || '')}</div>
-      </div>
-      <div class="history-strip">
-        ${hist.map(h => `<div class="bar" style="height:${h.h};background:${h.c}"></div>`).join('')}
+  const blocks = vis.map(t => {
+    if (answeredCount(t.id) < 3) return '';
+    const hist = history14(t.id);
+    const p = patternInfo(t.id);
+    return `
+      <div class="history-block">
+        <div class="history-head">
+          <div class="kicker">${many ? esc(t.name) + ' · last 14 days' : 'Last 14 days'}</div>
+          <div class="pattern-note">${esc(p.claim || '')}</div>
+        </div>
+        <div class="history-strip">
+          ${hist.map(h => `<div class="bar" style="height:${h.h};background:${h.c}"></div>`).join('')}
+        </div>
       </div>`;
+  });
 
-  const dayOneLine = emptyHistory
-    ? `<div class="q-note">Nothing to show here yet. Answer this for a week or two and the app can tell you which days are hardest.</div>`
-    : '';
+  const anyStrip = blocks.some(Boolean);
+  const dayOneLine = anyStrip
+    ? ''
+    : `<div class="q-note">Nothing to show here yet. Answer this for a week or two and the app can tell you which days are hardest.</div>`;
 
-  const tiles = visibleTrackers().map(t => {
+  const tiles = vis.map(t => {
     const d = daysSince(t.start);
     return `<button class="tile p-tap" onclick="openDetail('${t.id}')">
       <span class="n">${d}</span><span class="l">${unit(d)}, ${esc(t.name.toLowerCase())}</span>
@@ -538,7 +643,7 @@ function renderHomeLower(q) {
   }).join('');
 
   return `<div class="home-lower">
-    ${strip}
+    ${blocks.join('')}
     ${dayOneLine}
     <div class="tiles">${tiles}</div>
   </div>`;
@@ -575,7 +680,7 @@ function renderMilestoneScreen(q) {
 // ---- REASONS ---------------------------------------------
 
 function renderReasons() {
-  const trackers = visibleTrackers();
+  const trackers = orderedTrackers();
   let filter = ui.reasonsFilter;
   if (!filter || !trackerById(filter)) filter = (trackers[0] || {}).id;
   ui.reasonsFilter = filter;
@@ -668,7 +773,7 @@ function renderDetail() {
       </div>
     </div>
     <div class="dt-foot p-tap" onclick="openReset('${t.id}')">Reset the clock</div>
-    ${pinnedBar()}
+    ${pinnedBar(t.id)}
   `;
 }
 
@@ -1044,10 +1149,19 @@ function sheet(inner) {
   </div>`;
 }
 
+function cravingTracker() {
+  if (ui.draft.cravingTrackerId) return trackerById(ui.draft.cravingTrackerId) || null;
+  const vis = visibleTrackers();
+  if (!vis.length) return null;
+  const rough = vis.filter(t => (difficultyOn(todayYMD(), t.id) || {}).answer === 'rough');
+  const pool = rough.length ? rough : vis;
+  return pool.slice().sort((a, b) => daysSince(a.start) - daysSince(b.start))[0];
+}
+
 function renderCravingSheet() {
-  const answered = todayCheckin();
-  const rough = answered && !answered.skipped && answered.answer === 'rough';
-  const plan = planToday();
+  const t = cravingTracker();
+  const rough = t && (difficultyOn(todayYMD(), t.id) || {}).answer === 'rough';
+  const plan = t && planToday(t.id);
   const kicker = WD[new Date().getDay()] + ', ' + fmtTime(new Date());
   let line;
   if (plan && !plan.skipped && (plan.choice || plan.custom)) {
@@ -1057,7 +1171,7 @@ function renderCravingSheet() {
   } else {
     line = "It'll peak and fade in about fifteen minutes. You've been here before.";
   }
-  const nReasons = S.reasons.length;
+  const nReasons = t ? reasonsFor(t.id).length : S.reasons.length;
 
   return `
     <div style="display:flex;flex-direction:column;gap:7px">
@@ -1366,29 +1480,40 @@ function closeLayer() { stopClocks(); ui.layer = null; ui._focusId = null; rende
 
 // ---- check-in actions -------------------------
 
+// Records a once-a-day question (trigger / plan / week / milestone). Clears any
+// earlier answer to the same question and any skip marker for today.
 async function recordCheckin(fields) {
   const date = todayYMD();
-  S.checkins = S.checkins.filter(c => c.date !== date);
-  S.checkins.push(Object.assign({ date, at: new Date().toISOString(), skipped: false }, fields));
+  S.checkins = S.checkins.filter(c => !(c.date === date && (c.question === fields.question || c.skipped)));
+  S.checkins.push(Object.assign({ date, at: new Date().toISOString(), skipped: false, trackerId: null }, fields));
   if (!fields.skipped) { S.skipInfo.streak = 0; S.skipInfo.pausedUntil = null; }
   await persist('checkins', 'skipInfo');
 }
 
-async function answerDifficulty(key) {
-  await recordCheckin({ question: 'difficulty', answer: key });
+async function setDifficulty(trackerId, key) {
+  const date = todayYMD();
+  S.checkins = S.checkins.filter(c =>
+    !(c.date === date && ((c.question === 'difficulty' && c.trackerId === trackerId) || c.skipped)));
+  S.checkins.push({ date, at: new Date().toISOString(), question: 'difficulty', trackerId, answer: key, skipped: false });
+  S.skipInfo.streak = 0;
+  S.skipInfo.pausedUntil = null;
+  await persist('checkins', 'skipInfo');
   ui.draft = {};
   render();
-  toast(key === 'rough'
-    ? "Noted. There's a craving button under your thumb whenever you need it."
-    : 'Noted. See you tomorrow.');
+  if (todaysQuestionDone()) {
+    const anyRough = visibleTrackers().some(t => (difficultyOn(todayYMD(), t.id) || {}).answer === 'rough');
+    toast(anyRough
+      ? "Noted. There's a craving button under your thumb whenever you need it."
+      : 'Noted. See you tomorrow.');
+  }
 }
 
-async function skipToday(type) {
+async function skipToday() {
   S.skipInfo.streak = (S.skipInfo.streak || 0) + 1;
   if (S.skipInfo.streak >= 3) S.skipInfo.pausedUntil = shiftYMD(7);
   const date = todayYMD();
   S.checkins = S.checkins.filter(c => c.date !== date);
-  S.checkins.push({ date, at: new Date().toISOString(), question: type, answer: null, skipped: true });
+  S.checkins.push({ date, at: new Date().toISOString(), question: 'skip', trackerId: null, answer: null, skipped: true });
   await persist('checkins', 'skipInfo');
   ui.draft = {};
   render();
@@ -1418,20 +1543,28 @@ async function bumpTrigger(id) {
   if (v) { v.count++; v.lastUsed = new Date().toISOString(); await persist('triggers'); }
 }
 
+function qTrackerId() { return (ui._q || {}).trackerId || null; }
+
 async function saveTriggerAnswer() {
   syncDraft();
   const id = ui.draft.trigger;
   if (!id) { toast('Pick what was going on, or skip.'); return; }
+  const tId = qTrackerId();
   await bumpTrigger(id);
-  await recordCheckin({ question: 'trigger', answer: triggerLabel(id) });
+  await recordCheckin({ question: 'trigger', trackerId: tId, answer: triggerLabel(id) });
+  if (tId) {
+    S.notes.push({ id: uid(), trackerId: tId, triggerId: id, text: 'Noted from the morning check-in.', createdAt: new Date().toISOString(), auto: true });
+    await persist('notes');
+  }
   ui.draft = {};
   render();
   toast('Noted. See you tomorrow.');
 }
 
 async function triggerWriteInstead() {
-  await recordCheckin({ question: 'trigger', answer: '(wrote a note)' });
-  ui.draft = { trackerId: (visibleTrackers()[0] || {}).id };
+  const tId = qTrackerId() || (visibleTrackers()[0] || {}).id;
+  await recordCheckin({ question: 'trigger', trackerId: tId, answer: '(wrote a note)' });
+  ui.draft = { trackerId: tId };
   ui.layer = 'note';
   render();
 }
@@ -1444,16 +1577,17 @@ async function savePlan() {
   if (d.plan === 'other') { custom = (d.planOther || '').trim(); if (!custom) { toast('Say what the plan is, or pick No plan today.'); return; } }
   else if (typeof d.plan === 'number') choice = PLAN_OPTS[d.plan];
   else { toast('Pick a plan, or No plan today.'); return; }
-  S.plans = S.plans.filter(p => p.date !== todayYMD());
-  S.plans.push({ date: todayYMD(), choice, custom });
+  const tId = qTrackerId();
+  S.plans = S.plans.filter(p => !(p.date === todayYMD() && p.trackerId === tId));
+  S.plans.push({ date: todayYMD(), trackerId: tId, choice, custom });
   await persist('plans');
-  await recordCheckin({ question: 'plan', answer: custom || choice });
+  await recordCheckin({ question: 'plan', trackerId: tId, answer: custom || choice });
   ui.draft = {};
   render();
   toast('Locked in. The craving screen will show it tonight.');
 }
 async function noPlanToday() {
-  await recordCheckin({ question: 'plan', answer: null, skipped: false });
+  await recordCheckin({ question: 'plan', trackerId: qTrackerId(), answer: null });
   ui.draft = {};
   render();
   toast('No plan today. See you tomorrow.');
@@ -1499,9 +1633,20 @@ async function deleteReason(id) {
 
 // ---- craving sheet --------------------------
 
-function openCraving() { stopClocks(); ui.layer = 'craving'; ui.draft = {}; render(); }
-function cravingToReasons() { ui.layer = null; ui.reasonsFilter = (visibleTrackers()[0] || {}).id; ui.screen = 'reasons'; render(); }
-function cravingToNote() { ui.draft = { trackerId: (visibleTrackers()[0] || {}).id }; ui.layer = 'note'; render(); }
+function openCraving(trackerId) { stopClocks(); ui.layer = 'craving'; ui.draft = trackerId ? { cravingTrackerId: trackerId } : {}; render(); }
+function cravingToReasons() {
+  const t = cravingTracker();
+  ui.layer = null;
+  ui.reasonsFilter = (t || visibleTrackers()[0] || {}).id;
+  ui.screen = 'reasons';
+  render();
+}
+function cravingToNote() {
+  const t = cravingTracker();
+  ui.draft = { trackerId: (t || visibleTrackers()[0] || {}).id };
+  ui.layer = 'note';
+  render();
+}
 
 // ---- exercises -----------------------------
 
@@ -1593,7 +1738,7 @@ function openTrackerSheet(id) { stopClocks(); ui.draft = { trackerId: id || null
 function trackRowClick(e, id) {
   const row = e.currentTarget;
   if (row._noClick) { row._noClick = false; return; }
-  openTrackerSheet(id);
+  openDetail(id);
 }
 function trName(n) { syncDraft(); ui.draft.name = n; render(); }
 function trColor(i) { syncDraft(); ui.draft.colorIdx = i; render(); }
@@ -1661,7 +1806,7 @@ async function saveSlipTrigger() {
   const t = trackerById(d.trackerId);
   if (d.trigger) {
     await bumpTrigger(d.trigger);
-    S.notes.push({ id: uid(), trackerId: t.id, triggerId: d.trigger, text: 'Logged from the reset screen.', createdAt: new Date().toISOString() });
+    S.notes.push({ id: uid(), trackerId: t.id, triggerId: d.trigger, text: 'Logged from the reset screen.', createdAt: new Date().toISOString(), auto: true });
     await persist('notes');
   }
   ui.layer = null; ui.draft = {};
@@ -1833,7 +1978,7 @@ function writeFromArticle() {
 
 Object.assign(window, {
   go, openDetail, closeLayer, openCraving,
-  answerDifficulty, skipToday, pickTriggerChip, openCustomTrigger, commitCustomTrigger,
+  setDifficulty, skipToday, pickTriggerChip, openCustomTrigger, commitCustomTrigger,
   saveTriggerAnswer, triggerWriteInstead, pickPlan, savePlan, noPlanToday, weekAnswer,
   saveMilestone, skipMilestone, setReasonsFilter, deleteReason,
   cravingToReasons, cravingToNote, startBreathing, startTimer, toggleTimer, startTap, doTap,

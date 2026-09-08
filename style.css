@@ -302,6 +302,25 @@ p, div { text-wrap: pretty; }
 .opt-row.sel { border-color: var(--accent); background: var(--accent-wash-2); color: var(--text); }
 .opt-row.add { border: 1px dashed var(--border-strong); color: var(--text-dim); }
 
+/* ---- home: per-tracker difficulty rows --------------------- */
+
+.tc-list { margin-top: 22px; display: flex; flex-direction: column; gap: 20px; }
+.tc-block { display: flex; flex-direction: column; gap: 10px; }
+.tc-name { display: flex; align-items: center; gap: 9px; font-size: 15px; color: var(--text-muted); }
+.tc-name .cdot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.tc-opts { display: flex; gap: 8px; }
+.tc-opt {
+  flex: 1;
+  padding: 13px 6px;
+  border-radius: 13px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.2;
+}
+.tc-opt.sel { border-color: var(--accent); background: var(--accent-wash-2); color: var(--text); }
+
 /* ---- home: divider section (history + tiles) ---------------- */
 
 .home-lower {
@@ -310,9 +329,10 @@ p, div { text-wrap: pretty; }
   border-top: 1px solid var(--hairline);
   display: flex;
   flex-direction: column;
-  gap: 15px;
+  gap: 22px;
   padding-bottom: 22px;
 }
+.history-block { display: flex; flex-direction: column; gap: 15px; }
 .history-head { display: flex; align-items: center; justify-content: space-between; }
 .pattern-note { font-size: 12px; color: var(--text-dim); }
 .history-strip { display: flex; gap: 4px; align-items: flex-end; height: 44px; }
