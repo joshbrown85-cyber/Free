@@ -36,6 +36,10 @@ const TOPIC_QUERIES = {
     'emotional eating vs physical hunger strategies',
     'binge eating recovery evidence-based approaches'
   ],
+  weed: [
+    'quitting cannabis strategies coping with cravings',
+    'cannabis withdrawal timeline sleep appetite what to expect'
+  ],
   general: [
     'habit change urge surfing evidence-based techniques',
     'breaking bad habits cue craving response reward loop'
@@ -320,6 +324,10 @@ const QUOTE_QUERIES = {
   food: [
     'quotes emotional eating mindful relationship with food',
     'quotes self-compassion healing philosophers'
+  ],
+  weed: [
+    'quotes clarity presence over numbing philosophers',
+    'quotes self-discipline breaking free from a crutch'
   ],
   general: [
     'inspirational quotes overcoming addiction recovery',

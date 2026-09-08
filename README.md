@@ -9,15 +9,22 @@ The home screen **asks one question a day** and answering it is the whole intera
 - **Check-in (home)** — one of five questions: difficulty ("how hard does today feel?"), trigger (the morning after a rough day), the plan (the morning of a known-hard day), the week (Sundays), or a milestone question at 30 / 100 / 365 days. Skipping is always allowed; three skips in a row and it pauses for a week.
 - **Per-tracker** — the difficulty question is asked once for every visible tracker on a single screen (with one tracker it collapses to the plain three-option question). Everything downstream — the "which weekday is hardest" claim, the plan question, the trigger you're asked to name, and what the craving sheet surfaces — is scoped to the tracker it's actually about. The specialised questions still fire at most once a day.
 - **Hidden trackers** — a hidden tracker's clock keeps running but it drops out of the daily check-in and the home summary. It's still fully usable: tap it in Settings to open its detail screen (runs, notes, reset, edit).
-- **Craving sheet** — pinned under your thumb on every screen. Scoped to the tracker most at risk (rough today, or the shortest current streak) — or to the tracker whose detail screen you opened it from. One recommended action plus a quiet list: guided breathing, a 10-minute delay timer, a tap-it-out exercise, a line to sit with (a curated pool held on-device, mixed with your own written reasons), your reasons, or a quick note.
+- **Craving sheet** — pinned under your thumb on every screen. Scoped to the tracker most at risk (rough today, or the shortest current streak) — or to the tracker whose detail screen you opened it from. One recommended action plus a quiet list: guided breathing, a 10-minute delay timer, a tap-it-out exercise, a line to sit with (a curated pool, your own reasons, plus web quotes and AI reflections when Online extras is on), your reasons, or a quick note.
 - **Reasons** — your own writing, set large, filtered per tracker (hidden trackers included) — there to read mid-craving.
 - **Tracker detail** — every run as a bar you can read against the others, your notes in date order, and reset-the-clock as a line of text (never a button).
-- **Learn** — opens with something tied to what you logged this week; free-text search of habit/addiction reading, saved articles cached for offline.
+- **Learn** — opens with a recommendation tied to your most-logged trigger, then a "Suggested reading" list fetched for what you track (both on-device once fetched); free-text search of habit/addiction reading; saved articles cached for offline.
 - **Settings** — add / rename / hide / reorder trackers, check-in preferences, and export.
 
 ## Data & privacy
 
-All data is stored locally using IndexedDB. No backend, no account, no analytics, no sync. The **only** network request the app ever makes is Learn's article search; it degrades gracefully to an offline screen when it fails, and the copy says so in two places. Uninstalling the app (or clearing site data) deletes everything — export first if you want a backup.
+All data is stored locally using IndexedDB. No backend, no account, no analytics, no sync. Uninstalling the app (or clearing site data) deletes everything — export first if you want a backup.
+
+**Network use** (all optional, all fails-soft):
+
+- **Learn's article search** — the query string only; your trackers and notes are never part of it. Degrades to an offline screen when it fails.
+- **Online extras** (Settings → Online, on by default) — on launch, fetches web-sourced quotes and suggested reading matched to what you track, and short reflection lines. The reflection call is the one place the app sends anything you wrote: your **reasons** text goes to the serverless function (which uses Claude) to build them. Turn the toggle off and none of this runs. Everything fetched is cached on device and the app works fully without it.
+
+The two `Craving right now` copy lines about "reading isn't the only thing that helps" and "your trackers and notes aren't part of the search" remain accurate for the search action.
 
 ### Data model
 
@@ -39,7 +46,7 @@ python3 -m http.server 8000
 
 Then visit `http://localhost:8000`. Service workers require `https://` or `localhost`.
 
-Learn's search calls `/.netlify/functions/api?action=search` (Brave + Claude); it needs `BRAVE_API_KEY` and `ANTHROPIC_API_KEY` set on Netlify. Everything else works with no function and no network.
+`netlify/functions/api.js` backs the search (`action=search`), the launch-time suggested reading (`action=knowledge`), the web quotes (`action=quotes`) and the reflection lines (`action=reflections`) — Brave + Claude, needing `BRAVE_API_KEY` and `ANTHROPIC_API_KEY` set on Netlify. Every screen works with no function and no network; the online bits just stay empty.
 
 ## Deploying
 

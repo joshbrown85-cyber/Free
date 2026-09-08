@@ -96,7 +96,7 @@ const S = {
   schemaVersion: SCHEMA,
   trackers: [], reasons: [], notes: [], checkins: [], triggers: [],
   plans: [], articles: [], searches: [],
-  settings: { askAt: '08:30', hardDayReminders: true, milestoneQuestions: false, onboarded: false },
+  settings: { askAt: '08:30', hardDayReminders: true, milestoneQuestions: false, onboarded: false, onlineExtras: true },
   skipInfo: { streak: 0, pausedUntil: null },
   lastReset: null
 };
@@ -118,6 +118,12 @@ let ui = {
 };
 
 let _timers = { breath: null, tick: null, toast: null };
+
+// Online extras, fetched on launch and cached in IndexedDB (outside the
+// exported store — these are refetchable, not user data).
+let webReminders = [];       // [{ t, a, src:'web'|'personal' }]
+let suggestedArticles = [];   // [{ id, title, source, minutes, summary, url, body }]
+const CACHE_TTL = 24 * 3600 * 1000;
 
 // ---- storage ----------------------------------------------------
 
@@ -827,6 +833,16 @@ function renderLearn() {
         <span class="m">${rec.article.minutes} min read · ${esc(rec.article.source)}</span>
       </button>
     </div>` : '';
+
+  const more = suggestedArticles.filter(a => a.id !== (rec && rec.article.id));
+  const moreBlock = more.length ? `
+    <div class="ln-block">
+      <div class="kicker">Suggested reading</div>
+      ${more.map(a => `<button class="saved-item p-tap" onclick="openArticle('${a.id}')">
+        <span class="t">${esc(a.title)}</span><span class="m">${a.minutes} min · ${esc(a.source)}</span>
+      </button>`).join('')}
+    </div>` : '';
+
   const savedBlock = saved.length ? `
     <div class="ln-block">
       <div class="kicker">Saved</div>
@@ -845,40 +861,49 @@ function renderLearn() {
       <input class="search-field" id="search-in" placeholder="Search any habit or addiction"
         onfocus="startTyping()" value="${esc(sc.query)}">
     </div>
-    <div class="scroll"><div class="ln-body">${recBlock}${savedBlock}</div></div>
+    <div class="scroll"><div class="ln-body">${recBlock}${moreBlock}${savedBlock}</div></div>
     ${pinnedBar()}
   `;
 }
 
-function recommendedArticle() {
-  // tie a saved/seed article to the most-logged trigger this month
+const SEED_ARTICLE = {
+  id: 'seed-stress',
+  title: 'Why stress makes an old habit feel like the only option',
+  source: 'Harvard Health', minutes: 6,
+  summary: 'Under load, the brain reaches for whatever is most rehearsed. Naming that as mechanics rather than weakness makes it easier to interrupt.',
+  url: 'https://www.health.harvard.edu/staying-healthy/how-to-break-a-bad-habit',
+  body: 'Under cognitive load, the brain shifts decision-making away from the slow, deliberate system and toward whatever behaviour is most rehearsed. This is efficient. It is also why a decision you made calmly on Sunday has so little purchase on Friday night.\n\nThe practical consequence is that willpower is the wrong lever. What changes outcomes is reducing the number of decisions the stressed version of you has to make — deciding in advance, removing the cue, or having a single rehearsed alternative ready.\n\nNaming this as mechanics rather than weakness matters more than it sounds.'
+};
+
+function topTriggerLast30() {
   const cutoff = Date.now() - 30 * DAY;
   const tally = {};
   S.notes.filter(n => n.triggerId && new Date(n.createdAt).getTime() >= cutoff)
     .forEach(n => { tally[n.triggerId] = (tally[n.triggerId] || 0) + 1; });
-  let topId = null, topN = 0;
-  Object.keys(tally).forEach(id => { if (tally[id] > topN) { topN = tally[id]; topId = id; } });
+  let id = null, n = 0;
+  Object.keys(tally).forEach(k => { if (tally[k] > n) { n = tally[k]; id = k; } });
+  return n >= 2 ? { id, n, label: triggerLabel(id) } : null;
+}
 
-  const seed = {
-    id: 'seed-stress',
-    title: 'Why stress makes an old habit feel like the only option',
-    source: 'Harvard Health', minutes: 6,
-    summary: 'Under load, the brain reaches for whatever is most rehearsed. Naming that as mechanics rather than weakness makes it easier to interrupt.',
-    url: 'https://www.health.harvard.edu/staying-healthy/how-to-break-a-bad-habit',
-    body: 'Under cognitive load, the brain shifts decision-making away from the slow, deliberate system and toward whatever behaviour is most rehearsed. This is efficient. It is also why a decision you made calmly on Sunday has so little purchase on Friday night.\n\nThe practical consequence is that willpower is the wrong lever. What changes outcomes is reducing the number of decisions the stressed version of you has to make — deciding in advance, removing the cue, or having a single rehearsed alternative ready.\n\nNaming this as mechanics rather than weakness matters more than it sounds.'
-  };
-  // make sure the seed exists in the library so it can be opened/saved
-  if (!S.articles.some(a => a.id === seed.id)) { /* not persisted until saved */ }
+function recommendedArticle() {
+  const top = topTriggerLast30();
+  const pool = suggestedArticles.length ? suggestedArticles : [SEED_ARTICLE];
 
-  if (topId && topN >= 2) {
-    return { kicker: `Because you logged "${triggerLabel(topId).toLowerCase()}" ${topN} times`, article: articleForRead(seed) };
+  let article = pool[0];
+  if (top) {
+    const needle = top.label.toLowerCase();
+    article = pool.find(a => (a.title + ' ' + a.summary).toLowerCase().indexOf(needle) >= 0) || pool[0];
   }
-  return { kicker: 'A place to start', article: articleForRead(seed) };
+
+  const kicker = top
+    ? `Because you logged "${top.label.toLowerCase()}" ${top.n} times`
+    : (suggestedArticles.length ? 'For what you\'re working on' : 'A place to start');
+
+  return { kicker, article: articleForRead(article) };
 }
 
 function articleForRead(a) {
-  const saved = S.articles.find(x => x.id === a.id);
-  return saved || a;
+  return S.articles.find(x => x.id === a.id) || a;
 }
 
 function renderSearchTyping() {
@@ -1023,6 +1048,8 @@ function renderArticle() {
 function findArticle(id) {
   return S.articles.find(a => a.id === id)
     || (ui._transientArticles || []).find(a => a.id === id)
+    || suggestedArticles.find(a => a.id === id)
+    || (id === SEED_ARTICLE.id ? SEED_ARTICLE : null)
     || null;
 }
 
@@ -1068,6 +1095,16 @@ function renderSettings() {
           </button>
           <button class="set-line p-tap" onclick="toggleSetting('milestoneQuestions')">
             <span class="lbl">Milestone questions</span>${tog(S.settings.milestoneQuestions)}
+          </button>
+        </div>
+
+        <div class="set-group tight">
+          <div class="kicker">Online</div>
+          <button class="set-line p-tap" onclick="toggleSetting('onlineExtras')">
+            <span class="stack">
+              <span class="lbl">Quotes &amp; suggested reading</span>
+              <span class="sub">Fetched on launch. The reflection lines send your written reasons to build them; nothing else leaves the device.</span>
+            </span>${tog(S.settings.onlineExtras)}
           </button>
         </div>
 
@@ -1393,9 +1430,11 @@ function renderTapOverlay() {
 
 function renderReminderOverlay() {
   const q = ui.reminder || (ui.reminder = pickReminder());
-  const attribution = q.a === 'your own words'
-    ? 'your own words'
-    : (q.a && q.a !== '—') ? '— ' + q.a : 'sit with this one';
+  let attribution;
+  if (q.src === 'personal') attribution = 'written for you, from your reasons';
+  else if (q.a === 'your own words') attribution = 'your own words';
+  else if (q.a && q.a !== '—') attribution = '— ' + q.a;
+  else attribution = 'sit with this one';
   return `<div class="overlay center" style="width:100%;max-width:440px">
     <div class="reminder-block">
       <div class="reminder-quote">${esc(q.t)}</div>
@@ -1750,7 +1789,9 @@ function doTap() {
 
 let _lastReminderText = null;
 function pickReminder() {
-  const pool = REMINDERS.concat(S.reasons.map(r => ({ t: r.text, a: 'your own words' })));
+  const pool = REMINDERS
+    .concat(webReminders)
+    .concat(S.reasons.map(r => ({ t: r.text, a: 'your own words', src: 'reason' })));
   const choices = pool.length > 1 ? pool.filter(q => q.t !== _lastReminderText) : pool;
   const q = choices[Math.floor(Math.random() * choices.length)] || pool[0];
   _lastReminderText = q.t;
@@ -1789,6 +1830,7 @@ async function saveReason() {
   if (ui.screen === 'reasons') ui.reasonsFilter = d.trackerId;
   render();
   toast('Saved.');
+  refreshFromNetwork({ reflections: true });
 }
 
 // ---- tracker add / edit --------------------
@@ -1826,6 +1868,7 @@ async function saveTracker() {
   await persist('trackers');
   ui.layer = null; ui.draft = {};
   render();
+  refreshFromNetwork({ force: true });
 }
 
 async function deleteTracker(id) {
@@ -1836,6 +1879,7 @@ async function deleteTracker(id) {
   ui.layer = null; ui.draft = {};
   if (ui.detailId === id) ui.screen = 'home';
   render();
+  refreshFromNetwork({ force: true });
 }
 
 // ---- reset / slip flow --------------------
@@ -1877,13 +1921,22 @@ function closeSlip() { ui.layer = null; ui.draft = {}; ui.screen = 'detail'; ren
 
 // ---- settings actions --------------------
 
-async function toggleSetting(key) { S.settings[key] = !S.settings[key]; await persist('settings'); render(); }
+async function toggleSetting(key) {
+  S.settings[key] = !S.settings[key];
+  await persist('settings');
+  render();
+  if (key === 'onlineExtras' && S.settings.onlineExtras) refreshFromNetwork({ force: true });
+}
 async function setAskAt(v) { if (v) { S.settings.askAt = v; await persist('settings'); render(); } }
 
 function openDeleteAll() { ui.layer = 'deleteAll'; render(); }
 async function deleteAll() {
   for (const k of KEYS) { try { await window.storage.delete(k); } catch (e) {} }
-  try { await window.storage.delete('streakHistory'); await window.storage.delete('journal'); await window.storage.delete('customTopics'); } catch (e) {}
+  try {
+    for (const k of ['streakHistory', 'journal', 'customTopics', 'cache-quotes', 'cache-reflections', 'cache-articles']) {
+      await window.storage.delete(k);
+    }
+  } catch (e) {}
   location.reload();
 }
 
@@ -1934,6 +1987,7 @@ async function obFinish(withReason) {
   ui.draft = {};
   ui.screen = 'home';
   render();
+  refreshFromNetwork({ force: true });
 }
 
 // ---- learn / search actions -------------
@@ -2011,8 +2065,8 @@ async function toggleSaveResult(id) {
 
 function openArticle(id) {
   ui.articleId = id;
-  const seed = recommendedArticle().article;
-  if (id === seed.id && !S.articles.some(a => a.id === id)) ui._transientArticles = [seed];
+  const found = findArticle(id);
+  if (found && !S.articles.some(a => a.id === id)) ui._transientArticles = [found];
   ui.screen = 'article';
   render();
 }
@@ -2051,11 +2105,120 @@ Object.assign(window, {
   openResult, toggleSaveResult, openArticle, backFromArticle, toggleSaveArticle, writeFromArticle
 });
 
+// ---- online extras (quotes, reflections, suggested reading) ----
+
+function fetchJson(url, opts) {
+  return fetch(url, opts).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+}
+
+function habitTopic(name) {
+  const n = (name || '').toLowerCase();
+  if (/alcohol|drink|beer|wine|sober/.test(n)) return 'alcohol';
+  if (/smok|nicotine|vape|cigarette|tobacco/.test(n)) return 'smoking';
+  if (/porn|compulsive|nsfw/.test(n)) return 'porn';
+  if (/phone|scroll|screen|social|doomscroll/.test(n)) return 'phone';
+  if (/gambl|bet|casino|poker/.test(n)) return 'gambling';
+  if (/food|eat|binge|snack|sugar/.test(n)) return 'food';
+  if (/weed|cannabis|marijuana|thc|pot/.test(n)) return 'weed';
+  return 'general';
+}
+
+function mergeReminders(items, src) {
+  (items || []).forEach(it => {
+    if (!it || !it.t) return;
+    const known = REMINDERS.some(x => x.t === it.t) || webReminders.some(x => x.t === it.t);
+    if (!known) webReminders.push({ t: it.t, a: it.a || null, src: it.src || src || 'web' });
+  });
+}
+
+async function loadCaches() {
+  try {
+    const wq = await window.storage.get('cache-quotes');
+    if (wq && Array.isArray(wq.items)) mergeReminders(wq.items, 'web');
+  } catch (e) {}
+  try {
+    const rf = await window.storage.get('cache-reflections');
+    if (rf && Array.isArray(rf.items)) mergeReminders(rf.items, 'personal');
+  } catch (e) {}
+  try {
+    const ar = await window.storage.get('cache-articles');
+    if (ar && Array.isArray(ar.items)) suggestedArticles = ar.items;
+  } catch (e) {}
+}
+
+async function cacheFresh(key) {
+  try { const c = await window.storage.get(key); return !!(c && c.ts && Date.now() - c.ts < CACHE_TTL); }
+  catch (e) { return false; }
+}
+
+// Fire-and-forget. opts.force refetches everything; opts.reflections forces
+// just the reflections (used after a reason changes).
+async function refreshFromNetwork(opts) {
+  opts = opts || {};
+  if (!S.settings.onlineExtras || !navigator.onLine || !S.trackers.length) return;
+
+  const habits = visibleTrackers().map(t => t.name);
+  const topics = [...new Set(habits.map(habitTopic))];
+  const hot = topTriggerLast30();
+
+  if (opts.force || !(await cacheFresh('cache-quotes'))) {
+    fetchJson('/.netlify/functions/api?action=quotes&habits=' + encodeURIComponent(topics.join(',')))
+      .then(d => {
+        if (d && d.quotes && d.quotes.length) {
+          mergeReminders(d.quotes, 'web');
+          window.storage.set('cache-quotes', { items: d.quotes, ts: Date.now() });
+        }
+      }).catch(() => {});
+  }
+
+  const withReasons = visibleTrackers()
+    .map(t => ({ name: t.name, reasons: reasonsFor(t.id).map(r => r.text) }))
+    .filter(h => h.reasons.length);
+  if (withReasons.length && (opts.force || opts.reflections || !(await cacheFresh('cache-reflections')))) {
+    fetchJson('/.netlify/functions/api?action=reflections', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ habits: withReasons })
+    }).then(d => {
+      if (d && d.reflections && d.reflections.length) {
+        webReminders = webReminders.filter(x => x.src !== 'personal');
+        mergeReminders(d.reflections, 'personal');
+        window.storage.set('cache-reflections', { items: d.reflections, ts: Date.now() });
+      }
+    }).catch(() => {});
+  }
+
+  if (opts.force || !(await cacheFresh('cache-articles'))) {
+    const queries = topics.map(topic => fetchJson('/.netlify/functions/api?action=knowledge&topic=' + encodeURIComponent(topic)));
+    if (hot) queries.push(fetchJson('/.netlify/functions/api?action=search&q=' + encodeURIComponent('"' + hot.label + '" cravings and habit change')));
+    Promise.allSettled(queries).then(settled => {
+      const seen = new Set();
+      const merged = [];
+      settled.forEach(s => {
+        if (s.status !== 'fulfilled' || !s.value) return;
+        (s.value.results || s.value.articles || []).forEach(raw => {
+          const r = normalizeResult(raw);
+          if (!r.title || !r.url || seen.has(r.url)) return;
+          seen.add(r.url);
+          r.id = 'sug-' + hash(r.url);
+          merged.push(r);
+        });
+      });
+      if (merged.length) {
+        suggestedArticles = merged.slice(0, 8);
+        window.storage.set('cache-articles', { items: suggestedArticles, ts: Date.now() });
+        if (ui.screen === 'learn' && ui.search.mode === 'idle') render();
+      }
+    });
+  }
+}
+
 // ---- boot --------------------------------
 
 async function boot() {
   await load();
+  if (S.settings.onlineExtras) await loadCaches();
   render();
+  refreshFromNetwork();
   // keep day counts fresh
   setInterval(() => { if (!ui.layer && (ui.screen === 'home' || ui.screen === 'detail')) render(); }, 60000);
 
