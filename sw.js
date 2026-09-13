@@ -4,7 +4,7 @@
 // (/.netlify/functions/api?action=search) — that is left to pass through
 // and is expected to fail gracefully when offline.
 
-const CACHE_NAME = 'free-cache-v5';
+const CACHE_NAME = 'free-cache-v6';
 
 const APP_SHELL = [
   './',

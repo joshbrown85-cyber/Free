@@ -1,5 +1,5 @@
 /* ===================================================================
-   Free — "Check-in" redesign, app logic
+   Free — "Ledger" redesign, app logic
 
    Vanilla JS, no build step. Storage is window.storage (db.js), an
    IndexedDB-backed key/value store. Everything renders by rebuilding
@@ -7,8 +7,12 @@
 
    Persisted keys:
      schemaVersion  int
-     trackers   [{ id, name, color, start, best, runs:[{endedOn,length}], hidden, order }]
-     reasons    [{ id, trackerId, text, writtenAt, source }]
+     trackers   [{ id, name, color, start, best, runs:[{endedOn,length,triggerId|null}], hidden, order }]
+                  a run's triggerId is what ended it ("ended by"); null means
+                  the user skipped the question at reset time ("not logged")
+     reasons    [{ id, trackerId, text, writtenAt, source, shownCount? }]
+                  shownCount: how often the reason has surfaced mid-urge
+                  (opened via "Read your reasons", or picked as a reminder line)
      notes      [{ id, trackerId, triggerId|null, text, createdAt }]
      checkins   [{ date:'YYYY-MM-DD', question, answer, skipped, at, trackerId, milestoneN? }]
                   difficulty: one row per visible tracker per day (trackerId set)
@@ -18,6 +22,10 @@
      plans      [{ date:'YYYY-MM-DD', trackerId, choice, custom }]
      articles   [{ id, title, source, minutes, summary, url, savedAt, body }]
      searches   [{ id, query, keptAt }]
+     urges      [{ id, at, trackerId, tool, outcome }]
+                  tool: 'breathe'|'reasons'|'wait'|'tap'|'log'|null (null = "It
+                  passed" tapped with no tool opened). outcome: 'passed'|'slip'|null.
+                  'reminder' is not logged — its row in Urge help carries no rate.
      settings   { askAt, hardDayReminders, milestoneQuestions, onboarded }
      skipInfo   { streak, pausedUntil }
      lastReset  { trackerId, at } | null
@@ -95,13 +103,24 @@ const REMINDERS = [
 const S = {
   schemaVersion: SCHEMA,
   trackers: [], reasons: [], notes: [], checkins: [], triggers: [],
-  plans: [], articles: [], searches: [],
+  plans: [], articles: [], searches: [], urges: [],
   settings: { askAt: '08:30', hardDayReminders: true, milestoneQuestions: false, onboarded: false, onlineExtras: true },
   skipInfo: { streak: 0, pausedUntil: null },
   lastReset: null
 };
 
-const KEYS = ['schemaVersion','trackers','reasons','notes','checkins','triggers','plans','articles','searches','settings','skipInfo','lastReset'];
+const KEYS = ['schemaVersion','trackers','reasons','notes','checkins','triggers','plans','articles','searches','urges','settings','skipInfo','lastReset'];
+
+// Tools shown (with a success rate) in Urge help. 'reminder' and 'log' are
+// intentionally excluded — see the persisted-keys note above.
+const URGE_TOOLS = [
+  { key: 'breathe', label: 'Breathe, one minute' },
+  { key: 'reasons', label: null }, // label built per-tracker: "Read your N reasons"
+  { key: 'wait', label: 'Wait ten minutes' },
+  { key: 'tap', label: 'Tap it out' }
+];
+const URGE_RATE_THRESHOLD = 4;   // uses needed before a tool shows a percentage
+const URGE_STATEMENT_THRESHOLD = 3; // urges logged before the odds statement uses a real number
 
 let ui = {
   screen: 'home',
@@ -114,7 +133,15 @@ let ui = {
   search: { mode: 'idle', query: '', results: null, error: false },
   breath: { cycle: 1, inhale: true },
   timer: { left: 600, running: true },
-  tap: 0
+  tap: 0,
+  // urge help: true while a tool overlay opened from urge help is showing
+  // (closing it returns to the sheet, not straight to home), the id of the
+  // in-progress urges[] row (if the tool is a measured one), and the
+  // tracker the sheet was opened for.
+  urgeHelpActive: false,
+  urgeEntryId: null,
+  urgeTrackerId: null,
+  reasonsFromUrge: false
 };
 
 let _timers = { breath: null, tick: null, toast: null };
@@ -262,6 +289,62 @@ function triggerLabel(id) { const t = S.triggers.find(v => v.id === id); return 
 function sortedTriggers() {
   return S.triggers.slice().sort((a, b) =>
     (b.count - a.count) || (new Date(b.lastUsed || 0) - new Date(a.lastUsed || 0)));
+}
+
+// ---- urge help derivations ------------------------------------
+// Urge help states the user's own odds instead of recommending. Every
+// measured tool (breathe/reasons/wait/tap) carries used/passed counts
+// derived from S.urges; 'reminder' and 'log' are never logged there.
+
+function urgesFor(trackerId) { return S.urges.filter(u => u.trackerId === trackerId); }
+
+function toolStats(trackerId) {
+  const rows = urgesFor(trackerId);
+  const stats = {};
+  URGE_TOOLS.forEach(t => { stats[t.key] = { used: 0, passed: 0 }; });
+  rows.forEach(u => {
+    if (!stats[u.tool]) return;
+    stats[u.tool].used++;
+    if (u.outcome === 'passed') stats[u.tool].passed++;
+  });
+  return stats;
+}
+
+function urgesStatement(trackerId) {
+  const rows = urgesFor(trackerId);
+  const total = rows.length;
+  const passed = rows.filter(u => u.outcome === 'passed').length;
+  if (total < URGE_STATEMENT_THRESHOLD) {
+    return total === 0
+      ? "Nothing logged here yet. The odds show up once you've used this a few times."
+      : `You've logged ${numWord(total)} urge${total === 1 ? '' : 's'} — not enough yet to say how these usually go.`;
+  }
+  return `You've logged ${numWord(total)} urge${total === 1 ? '' : 's'}. ${cap(numWord(passed))} of them passed inside twenty minutes.`;
+}
+
+function logUrge(trackerId, tool) {
+  const row = { id: uid(), at: new Date().toISOString(), trackerId, tool, outcome: null };
+  S.urges.push(row);
+  persist('urges');
+  return row.id;
+}
+async function resolveUrge(id, outcome) {
+  const row = S.urges.find(u => u.id === id);
+  if (row) { row.outcome = outcome; await persist('urges'); }
+}
+
+// ---- tracker detail: what ends a run ---------------------------
+
+function runsEndedByTally(t) {
+  const tally = {};
+  (t.runs || []).forEach(r => {
+    const key = r.triggerId || '_none';
+    tally[key] = (tally[key] || 0) + 1;
+  });
+  const rows = Object.keys(tally).map(key => ({
+    key, label: key === '_none' ? 'Not logged' : (triggerLabel(key) || 'Not logged'), n: tally[key]
+  })).sort((a, b) => b.n - a.n);
+  return rows;
 }
 
 // ---- check-in derivations -----------------------------------
@@ -449,36 +532,142 @@ function statusbar(right, onRight) {
 }
 function nowClock() { return fmtTime(new Date()).replace(/(am|pm)$/, ''); }
 
+// A two-way mono top bar (Back / Edit, Back / tracker name, …) — the same
+// 52px row as statusbar(), but with both sides tappable.
+function topBar(lt, lf, rt, rf) {
+  return `<div class="statusbar">
+    <span class="right p-tap" onclick="${lf}">${esc(lt)}</span>
+    <span class="right p-tap" ${rf ? `onclick="${rf}"` : ''}>${esc(rt)}</span>
+  </div>`;
+}
+
 function pinnedBar(trackerId) {
   return `<div class="pinned">
-    <button class="craving p-tap" onclick="openCraving(${trackerId ? `'${trackerId}'` : ''})">Craving right now</button>
+    <button class="craving p-tap" onclick="openCraving(${trackerId ? `'${trackerId}'` : ''})">Urge help</button>
     <button class="help p-tap" onclick="go('learn')" aria-label="Learn">?</button>
   </div>`;
 }
 
-// ---- HOME ---------------------------------------------------
+// ---- HOME: the ledger ----------------------------------------
+// Home is the record, not a question. Every tracker sits on one screen
+// with its own 7-day strip and counts; the daily check-in is a single
+// compact row at the top, shown only until it's answered.
 
 function renderHome() {
   const q = pickQuestion();
   ui._q = q;
-  if (q && q.type === 'milestone') return renderMilestoneScreen(q);
+
+  if (!S.trackers.length) {
+    return `
+      ${statusbar({ text: '' }, 'go(\'settings\')')}
+      <div class="ldg-header"><div class="ldg-brand">Free</div></div>
+      <div class="scroll pad">
+        <div class="ldg-empty">Nothing tracked yet. Open Settings to add something.</div>
+      </div>
+    `;
+  }
 
   const dateLabel = WD_SHORT[new Date().getDay()] + ' ' + fmtDayMon(new Date());
-  const body = q ? renderQuestion(q) : renderQuietSummary();
+  const tracked = S.trackers.length;
+  const runCount = S.trackers.reduce((sum, t) => sum + (t.runs || []).length, 0);
 
   return `
     ${statusbar({ text: dateLabel }, 'go(\'settings\')')}
-    <div class="scroll pad">
-      ${body}
-      ${renderHomeLower(q)}
+    <div class="ldg-header">
+      <div class="ldg-brand">Free</div>
+      <div class="ldg-meta">${tracked} tracked · ${runCount} run${runCount === 1 ? '' : 's'}</div>
     </div>
-    ${pinnedBar()}
+    <div class="scroll pad">
+      ${renderCheckinRow()}
+      ${orderedTrackers().map(ledgerRow).join('')}
+      ${renderRecentNotes()}
+    </div>
+    ${renderLedgerFooter()}
   `;
 }
 
-function renderQuestion(q) {
-  if (q.type === 'difficulty') return renderDifficulty();
+function ledgerRow(t) {
+  if (t.hidden) {
+    const d = daysSince(t.start);
+    return `
+      <button class="ldg-hidden-row p-tap" onclick="openDetail('${t.id}')">
+        <span style="display:flex;align-items:center;gap:9px">
+          <span class="cdot" style="width:6px;height:6px;border-radius:50%;background:var(--dot-off);display:block"></span>
+          <span class="n">${esc(t.name)}</span>
+        </span>
+        <span class="meta">hidden · ${d}d</span>
+      </button>`;
+  }
 
+  const d = daysSince(t.start);
+  const pb = pastBest(t);
+  const best = Math.max(d, pb);
+  const bestLabel = 'best ' + best + 'd' + (d >= pb && d > 0 ? ' · own record' : '');
+  const strip = ledgerStrip(t.id);
+  const nReasons = reasonsFor(t.id).length, nNotes = notesFor(t.id).length;
+
+  return `
+    <button class="ldg-row p-tap" onclick="openDetail('${t.id}')">
+      <div class="ldg-row-top">
+        <div class="ldg-row-name"><span class="cdot" style="background:${esc(t.color)}"></span><span class="n">${esc(t.name)}</span></div>
+        <div class="ldg-row-count"><span class="num">${d}</span><span class="unit">d</span></div>
+      </div>
+      <div class="ldg-strip">
+        ${strip.map(b => `<div class="bar" style="height:${b.h}%${b.today ? ';background:' + esc(t.color) : ''}"></div>`).join('')}
+      </div>
+      <div class="ldg-row-foot">
+        <span>${esc(bestLabel)}</span>
+        <span>${nReasons} reason${nReasons === 1 ? '' : 's'} · ${nNotes} note${nNotes === 1 ? '' : 's'}</span>
+      </div>
+    </button>`;
+}
+
+function ledgerStrip(trackerId) {
+  const out = [];
+  for (let i = 6; i >= 0; i--) {
+    const c = difficultyOn(shiftYMD(-i), trackerId);
+    let h;
+    if (c && c.answer === 'rough') h = 100;
+    else if (c && c.answer === 'manageable') h = 58;
+    else if (c) h = 28;
+    else h = 12;
+    out.push({ h, today: i === 0 });
+  }
+  return out;
+}
+
+function renderRecentNotes() {
+  const notes = S.notes.slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  if (!notes.length) return '';
+  const recent = notes.slice(0, 2);
+  const jumpId = notes[0].trackerId;
+  return `
+    <div class="ldg-notes">
+      <div class="ldg-notes-head">
+        <span class="kicker">Recent notes</span>
+        ${notes.length > 2 ? `<span class="all p-tap" onclick="openDetail('${jumpId}')">All ${notes.length}</span>` : ''}
+      </div>
+      ${recent.map(n => {
+        const lbl = triggerLabel(n.triggerId);
+        return `<button class="ldg-note p-tap" style="text-align:left;background:transparent;border:0;width:100%;padding-top:1px;padding-bottom:1px" onclick="openDetail('${n.trackerId}')">
+          <div class="meta">${esc(fmtStamp(n.createdAt))}${lbl ? ' · ' + esc(lbl.toLowerCase()) : ''}</div>
+          <div class="body">${esc(n.text)}</div>
+        </button>`;
+      }).join('')}
+    </div>`;
+}
+
+function renderLedgerFooter() {
+  const defaultId = (visibleTrackers()[0] || orderedTrackers()[0] || {}).id;
+  return `
+    <div class="ldg-footer">
+      <button class="primary p-tap" onclick="openCraving()">Urge help</button>
+      <button class="sq p-tap" aria-label="Add a note" onclick="openNoteSheet('${defaultId}')">+</button>
+      <button class="sq mono p-tap" aria-label="Reasons" onclick="go('reasons')">Aa</button>
+    </div>`;
+}
+
+function renderQuestion(q) {
   if (q.type === 'trigger') {
     const t = trackerById(q.trackerId);
     const many = visibleTrackers().length > 1;
@@ -560,51 +749,6 @@ function renderQuestion(q) {
   return '';
 }
 
-function renderDifficulty() {
-  const vis = visibleTrackers();
-  const today = todayYMD();
-  const kicker = answeredCount() === 0 ? 'First check-in' : 'Morning check-in';
-
-  if (vis.length === 1) {
-    const t = vis[0];
-    const cur = (difficultyOn(today, t.id) || {}).answer;
-    return `
-      <div class="checkin-head">
-        <div class="kicker">${kicker}</div>
-        <h2 class="q-title">How hard does today feel?</h2>
-      </div>
-      <div class="answers">
-        ${DIFFICULTY_OPTS.map(o => `
-          <button class="answer-row p-tap ${cur === o.key ? 'sel' : ''}" onclick="setDifficulty('${t.id}','${o.key}')">
-            <span class="dot"></span><span class="lbl">${esc(o.label)}</span>
-          </button>`).join('')}
-      </div>
-      <div class="skip-link p-tap" onclick="skipToday()">Skip today</div>
-    `;
-  }
-
-  const rows = vis.map(t => {
-    const cur = (difficultyOn(today, t.id) || {}).answer;
-    return `
-      <div class="tc-block">
-        <div class="tc-name"><span class="cdot" style="background:${esc(t.color)}"></span>${esc(t.name)}</div>
-        <div class="tc-opts">
-          ${[['easy', 'Easy'], ['manageable', 'Manageable'], ['rough', 'Rough']].map(([k, lbl]) => `
-            <button class="tc-opt p-tap ${cur === k ? 'sel' : ''}" onclick="setDifficulty('${t.id}','${k}')">${lbl}</button>`).join('')}
-        </div>
-      </div>`;
-  }).join('');
-
-  return `
-    <div class="checkin-head">
-      <div class="kicker">${kicker}</div>
-      <h2 class="q-title">How hard does today feel?</h2>
-    </div>
-    <div class="tc-list">${rows}</div>
-    <div class="skip-link p-tap" onclick="skipToday()">Skip today</div>
-  `;
-}
-
 function relDay(iso) {
   const d = ymd(iso);
   if (d === todayYMD()) return 'today';
@@ -612,203 +756,232 @@ function relDay(iso) {
   return 'on ' + WD[new Date(iso).getDay()];
 }
 
-function renderQuietSummary() {
-  const vis = visibleTrackers();
-  if (!vis.length) {
-    return `<div class="summary-note" style="margin-top:40px">Every tracker is hidden right now. Open Settings to bring one back into the daily check-in.</div>`;
-  }
-  const today = todayYMD();
-  const anyRough = vis.some(t => (difficultyOn(today, t.id) || {}).answer === 'rough');
-  let noteText;
-  if (questionsPaused()) noteText = "Paused the questions for a week — you skipped a few. It'll ask again after that.";
-  else if (skippedOn(today)) noteText = "Skipped this morning. The app will ask again tomorrow.";
-  else if (specialOn(today)) noteText = "Checked in this morning. Nothing else to do here — the app will ask again tomorrow.";
-  else if (anyRough) noteText = "You said today feels rough. Nothing else to do here; the craving button is there if it turns.";
-  else noteText = "Checked in this morning. Nothing else to do here — the app will ask again tomorrow.";
+// ---- compact check-in row --------------------------------------
+// One row at the top of the ledger, shown only until today's question
+// is answered. Difficulty renders inline; the other three question
+// types (trigger/plan/week) plus milestone open as a sheet, unchanged
+// apart from tokens (renderQuestion / renderMilestoneSheet, reused).
 
-  const rows = vis.map(t => {
-    const d = daysSince(t.start);
-    return `
-      <button class="summary-row p-tap" onclick="openDetail('${t.id}')">
-        <span class="name-wrap">
-          <span class="name"><span class="cdot" style="background:${esc(t.color)}"></span>${esc(t.name)}</span>
-          <span class="since">${esc(fmtSinceFull(t.start))}</span>
-        </span>
-        <span class="count"><span class="num">${d}</span><span class="unit">${unit(d)}</span></span>
-      </button>`;
-  }).join('');
+function renderCheckinRow() {
+  const q = ui._q;
+  if (!q) return '';
+  if (q.type === 'difficulty') return renderCheckinDifficulty();
+
+  const vis = visibleTrackers();
+  const many = vis.length > 1;
+  let kicker, qtext, skipFn;
+  if (q.type === 'trigger') {
+    const t = trackerById(q.trackerId);
+    kicker = many && t ? t.name + ' — yesterday was rough' : 'Yesterday was rough';
+    qtext = 'What was going on?';
+    skipFn = 'skipToday()';
+  } else if (q.type === 'plan') {
+    const t = trackerById(q.trackerId);
+    const claim = patternInfo(q.trackerId).claim || 'Today tends to be hard';
+    kicker = many && t ? t.name + ': ' + claim : claim;
+    qtext = "What's the plan for tonight?";
+    skipFn = 'skipToday()';
+  } else if (q.type === 'week') {
+    kicker = 'Week ' + weekNumber();
+    qtext = 'How did this week go?';
+    skipFn = 'skipToday()';
+  } else { // milestone
+    const t = trackerById(q.trackerId);
+    kicker = (t ? t.name + ' · ' : '') + 'day ' + q.n;
+    qtext = "What's different now?";
+    skipFn = `skipMilestone('${q.trackerId}',${q.n})`;
+  }
 
   return `
-    <div class="summary">${rows}</div>
-    <div class="summary-note">${esc(noteText)}</div>
+    <div class="ck-row">
+      <div class="ck-kicker-row">
+        <span class="ck-kicker">${esc(kicker)}</span>
+        <span class="ck-skip p-tap" onclick="${skipFn}">Skip</span>
+      </div>
+      <button class="ck-q p-tap" style="text-align:left;background:transparent;border:0;padding:0;width:100%;display:flex;align-items:baseline;justify-content:space-between;gap:10px" onclick="openQuestionSheet()">
+        <span>${esc(qtext)}</span><span class="ck-answer" style="flex:0 0 auto">Answer ›</span>
+      </button>
+    </div>
   `;
 }
 
-function renderHomeLower() {
+function renderCheckinDifficulty() {
   const vis = visibleTrackers();
-  if (!vis.length) return '';
-  const many = vis.length > 1;
+  const kicker = answeredCount() === 0 ? 'First check-in' : 'Today';
 
-  const blocks = vis.map(t => {
-    if (answeredCount(t.id) < 3) return '';
-    const hist = history14(t.id);
-    const p = patternInfo(t.id);
+  if (vis.length > 1 && ui.draft.pendingDifficulty) {
+    const allLabel = vis.length === 2 ? 'Both' : 'All';
+    const chips = vis.map(t => `<button class="ck-chip p-tap" onclick="checkinPickTracker('${t.id}')">${esc(t.name)}</button>`).join('')
+      + `<button class="ck-chip p-tap" onclick="checkinPickAll()">${allLabel}</button>`;
     return `
-      <div class="history-block">
-        <div class="history-head">
-          <div class="kicker">${many ? esc(t.name) + ' · last 14 days' : 'Last 14 days'}</div>
-          <div class="pattern-note">${esc(p.claim || '')}</div>
+      <div class="ck-row">
+        <div class="ck-kicker-row">
+          <span class="ck-kicker">Which one?</span>
+          <span class="ck-skip p-tap" onclick="skipToday()">Skip</span>
         </div>
-        <div class="history-strip">
-          ${hist.map(h => `<div class="bar" style="height:${h.h};background:${h.c}"></div>`).join('')}
-        </div>
+        <div class="ck-chips">${chips}</div>
       </div>`;
-  });
+  }
 
-  const anyStrip = blocks.some(Boolean);
-  const dayOneLine = anyStrip
-    ? ''
-    : `<div class="q-note">Nothing to show here yet. Answer this for a week or two and the app can tell you which days are hardest.</div>`;
+  const chips = vis.length === 1
+    ? DIFFICULTY_OPTS.map(o => `<button class="ck-chip p-tap" onclick="checkinDifficulty('${vis[0].id}','${o.key}')">${cap(o.key)}</button>`).join('')
+    : [['easy', 'Easy'], ['manageable', 'Manageable'], ['rough', 'Rough']]
+        .map(([k, lbl]) => `<button class="ck-chip p-tap" onclick="checkinDifficulty(null,'${k}')">${lbl}</button>`).join('');
 
-  const tiles = vis.map(t => {
-    const d = daysSince(t.start);
-    return `<button class="tile p-tap" onclick="openDetail('${t.id}')">
-      <span class="n">${d}</span><span class="l">${unit(d)}, ${esc(t.name.toLowerCase())}</span>
-    </button>`;
-  }).join('');
-
-  return `<div class="home-lower">
-    ${blocks.join('')}
-    ${dayOneLine}
-    <div class="tiles">${tiles}</div>
-  </div>`;
+  return `
+    <div class="ck-row">
+      <div class="ck-kicker-row">
+        <span class="ck-kicker">${esc(kicker)}</span>
+        <span class="ck-skip p-tap" onclick="skipToday()">Skip</span>
+      </div>
+      <div class="ck-q">How hard does today feel?</div>
+      <div class="ck-chips">${chips}</div>
+    </div>`;
 }
 
-// ---- MILESTONE (full screen, replaces the check-in) --------
+function renderQuestionSheetInner() {
+  const q = ui._q;
+  if (!q) return `<div class="empty-note">Nothing to answer right now.</div><button class="btn-outline p-tap" onclick="closeLayer()">Close</button>`;
+  if (q.type === 'milestone') return renderMilestoneSheet(q);
+  return renderQuestion(q);
+}
 
-function renderMilestoneScreen(q) {
+function renderMilestoneSheet(q) {
   const t = trackerById(q.trackerId);
   return `
-    ${statusbar({ text: 'day ' + q.n })}
-    <div class="q-screen">
-      <div class="q-scroll">
-        <div class="big-num-block">
-          <div class="kicker">${esc(t.name)}</div>
-          <div class="row"><span class="n">${q.n}</span><span class="unit">days</span></div>
-        </div>
-        <div style="margin-top:28px;display:flex;flex-direction:column;gap:9px">
-          <div class="milestone-q">What's different now that wasn't ${q.n === 365 ? 'a year' : q.n + ' days'} ago?</div>
-          <div class="q-note">This gets kept with your reasons. It's the kind of thing that's hard to remember at 9pm on a Friday.</div>
-        </div>
-        <div style="margin-top:22px">
-          <textarea class="serif-input" id="milestone-in" rows="1" placeholder="One line."></textarea>
-        </div>
-        <div class="q-actions">
-          <button class="btn-primary p-tap" onclick="saveMilestone('${t.id}',${q.n})">Keep it</button>
-          <div class="link-quiet p-tap" onclick="skipMilestone('${t.id}',${q.n})">Not today</div>
-        </div>
-      </div>
+    <div class="big-num-block">
+      <div class="kicker">${esc(t.name)}</div>
+      <div class="row"><span class="n">${q.n}</span><span class="unit">days</span></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <div class="milestone-q">What's different now that wasn't ${q.n === 365 ? 'a year' : q.n + ' days'} ago?</div>
+      <div class="q-note">This gets kept with your reasons. It's the kind of thing that's hard to remember at 9pm on a Friday.</div>
+    </div>
+    <textarea class="serif-input" id="milestone-in" rows="1" placeholder="One line."></textarea>
+    <div class="q-actions" style="padding-top:4px">
+      <button class="btn-primary p-tap" onclick="saveMilestone('${t.id}',${q.n})">Keep it</button>
+      <div class="link-quiet p-tap" onclick="skipMilestone('${t.id}',${q.n})">Not today</div>
     </div>
   `;
 }
 
 // ---- REASONS ---------------------------------------------
+// Ledger's one un-dense screen: numbered blocks, one per reason, with
+// how often each has surfaced mid-urge.
 
 function renderReasons() {
   const trackers = orderedTrackers();
   let filter = ui.reasonsFilter;
   if (!filter || !trackerById(filter)) filter = (trackers[0] || {}).id;
   ui.reasonsFilter = filter;
+  const t = trackerById(filter);
 
-  const seg = trackers.map(t => `
-    <button class="seg p-tap ${t.id === filter ? 'sel' : ''}" onclick="setReasonsFilter('${t.id}')">${esc(t.name)}</button>`).join('');
+  const seg = trackers.length > 1 ? `<div class="segmented" style="margin:0 var(--gutter) 14px">${trackers.map(x => `
+    <button class="seg p-tap ${x.id === filter ? 'sel' : ''}" onclick="setReasonsFilter('${x.id}')">${esc(x.name)}</button>`).join('')}</div>` : '';
 
   const list = reasonsFor(filter);
   const items = list.length
-    ? list.map(r => `
-      <div class="reason">
-        <div class="text">${esc(r.text)}</div>
-        <div class="when">written ${esc(fmtStamp(r.writtenAt))}</div>
-        <div class="del p-tap" onclick="deleteReason('${r.id}')">Delete</div>
-      </div>`).join('')
-    : `<div class="empty-note">Nothing written for this one yet. One line is enough — it's what the craving screen will show you.</div>`;
+    ? list.map((r, i) => {
+        const shown = r.shownCount || 0;
+        return `<div class="rs2-item">
+          <span class="rs2-num">${String(i + 1).padStart(2, '0')}</span>
+          <div class="rs2-body">
+            <div class="rs2-text ${shown ? '' : 'unread'}">${esc(r.text)}</div>
+            <div class="rs2-meta">${esc(fmtStamp(r.writtenAt))}${shown ? ' · shown ' + shown + ' time' + (shown === 1 ? '' : 's') : ''}</div>
+            <span class="rs2-del p-tap" onclick="deleteReason('${r.id}')">Delete</span>
+          </div>
+        </div>`;
+      }).join('')
+    : `<div class="ldg-empty">Nothing written for this one yet. One line is enough — it's what urge help will show you.</div>`;
 
   return `
-    ${statusbar({ text: '' })}
-    <div class="rs-head">
-      <div class="rs-title-row">
-        <h1 class="screen-title">Why this matters</h1>
-        <span class="done-link p-tap" onclick="go('home')">Done</span>
-      </div>
-      ${trackers.length > 1 ? `<div class="segmented">${seg}</div>` : ''}
+    ${topBar('Back', "backFromReasons()", '', '')}
+    <div class="rs2-head">
+      <div class="rs2-title">Why this matters</div>
+      <div class="rs2-count">${list.length}</div>
     </div>
-    <div class="scroll"><div class="reasons-list">${items}</div></div>
-    <div class="rs-foot">
-      <button class="add-row p-tap" onclick="openReasonSheet('${filter}')">Add a reason</button>
+    ${seg}
+    <div class="scroll"><div class="rs2-list">${items}</div></div>
+    <div class="rs2-foot">
+      <button class="outline p-tap" onclick="openReasonSheet('${filter}')">Add a reason</button>
+      <button class="primary p-tap" onclick="openCraving('${t ? t.id : ''}')">Urge help</button>
     </div>
   `;
 }
 
 // ---- TRACKER DETAIL -------------------------------------
+// Runs as a table — started / length / ended by — with a tally of what
+// ends the runs underneath. A bar chart had no room for "ended by".
 
 function renderDetail() {
   const t = trackerById(ui.detailId);
   if (!t) { ui.screen = 'home'; return renderHome(); }
   const d = daysSince(t.start);
-  const runs = [{ when: 'now', len: d, cur: true }].concat(
-    (t.runs || []).slice().sort((a, b) => new Date(b.endedOn) - new Date(a.endedOn))
-      .map(r => ({ when: fmtStamp(r.endedOn), len: r.length, cur: false }))
-  );
-  const maxRun = Math.max(d, t.best || 0, ...runs.map(r => r.len), 1);
+  const pastRuns = (t.runs || []).slice().sort((a, b) => new Date(b.endedOn) - new Date(a.endedOn));
   const pb = pastBest(t);
-  const sub = fmtSinceFull(t.start) + ', ' + fmtTime(t.start) + (d >= pb ? ' · your longest run' : ' · best was ' + pb + 'd');
 
-  const runRows = runs.map(r => `
-    <div class="run-row">
-      <span class="when">${esc(r.when)}</span>
-      <span class="rbar" style="width:${Math.max(6, Math.round(r.len / maxRun * 100))}%;background:${r.cur ? 'var(--accent)' : 'var(--chart-lo)'}"></span>
-      <span class="len">${r.len}d</span>
-    </div>`).join('');
+  const runRows = [`<div class="td2-run">
+      <span class="started">${esc(fmtStamp(t.start))}</span>
+      <span class="length cur">${d}d</span>
+      <span class="endedby">running</span>
+    </div>`].concat(pastRuns.map(r => `
+    <div class="td2-run">
+      <span class="started">${esc(fmtStamp(r.endedOn))}</span>
+      <span class="length">${r.length}d</span>
+      <span class="endedby">${r.triggerId ? esc((triggerLabel(r.triggerId) || 'not logged').toLowerCase()) : 'not logged'}</span>
+    </div>`)).join('');
+
+  const tally = runsEndedByTally(t);
+  const maxTally = Math.max(1, ...tally.map(r => r.n));
+  const topRealKey = (tally.find(r => r.key !== '_none') || {}).key;
+  const tallyRows = tally.length ? tally.map(r => `
+    <div class="td2-tally-row">
+      <span class="lbl${r.key === '_none' ? ' dim' : ''}">${esc(r.label)}</span>
+      <span class="bar" style="width:${Math.max(6, Math.round(r.n / maxTally * 100))}%;background:${r.key === '_none' ? 'var(--rule-faint)' : (r.key === topRealKey ? 'var(--accent)' : 'var(--rule-strong)')}"></span>
+      <span class="count">${r.n}</span>
+    </div>`).join('') : '';
 
   const notes = notesFor(t.id);
   const noteRows = notes.length
     ? notes.map(n => {
         const lbl = triggerLabel(n.triggerId);
-        return `<div class="note-item">
+        return `<div class="ldg-note" style="border-left:1px solid var(--rule-strong)">
           <div class="meta">${esc(fmtStamp(n.createdAt))}${lbl ? ' · ' + esc(lbl.toLowerCase()) : ''}</div>
           <div class="body">${esc(n.text)}</div>
         </div>`;
       }).join('')
-    : `<div class="empty-note" style="padding-top:0">No notes yet.</div>`;
+    : `<div class="ldg-empty" style="padding-top:0">No notes yet.</div>`;
 
   return `
-    ${statusbar({ text: '' })}
-    <div class="dt-head">
-      <span class="back-link p-tap" onclick="go('home')">Back</span>
-      <span class="back-link p-tap" onclick="openTrackerSheet('${t.id}')">Edit</span>
+    ${topBar('Back', "go('home')", 'Edit', `openTrackerSheet('${t.id}')`)}
+    <div class="td2-head">
+      <div class="td2-name">
+        <div class="row"><span class="cdot" style="background:${esc(t.color)}"></span>${esc(t.name)}</div>
+        <div class="since">${esc(fmtSinceFull(t.start))}, ${esc(fmtTime(t.start))}</div>
+      </div>
+      <div class="td2-big"><span class="num">${d}</span><span class="unit">${unit(d)}</span></div>
     </div>
-    <div class="scroll">
-      <div class="dt-body">
-        <div class="dt-hero">
-          <div class="name"><span class="cdot" style="background:${esc(t.color)}"></span>${esc(t.name)}</div>
-          <div class="big"><span class="num">${d}</span><span class="unit">${unit(d)}</span></div>
-          <div class="sub">${esc(sub)}</div>
-        </div>
-        <div class="section">
-          <div class="kicker">Every run</div>
-          <div class="runs">${runRows}</div>
-        </div>
-        <div class="section" style="padding-bottom:8px">
-          <div class="section-head">
-            <div class="kicker">Notes</div>
-            <span class="done-link p-tap" onclick="openNoteSheet('${t.id}')">Write one</span>
-          </div>
-          <div class="notes-list">${noteRows}</div>
+    <div class="scroll pad">
+      <div class="td2-section">
+        <div class="td2-kicker">Runs</div>
+        <div class="td2-table">
+          <div class="td2-col-head"><span>started</span><span>length</span><span>ended by</span></div>
+          ${runRows}
         </div>
       </div>
+      ${tallyRows ? `<div class="td2-section">
+        <div class="td2-kicker">What ends your runs</div>
+        <div class="td2-tally">${tallyRows}</div>
+      </div>` : ''}
+      <div class="td2-section" style="padding-bottom:4px">
+        <div class="td2-kicker-row"><div class="td2-kicker">Notes</div><span class="write" onclick="openNoteSheet('${t.id}')">Write one</span></div>
+        ${noteRows}
+      </div>
     </div>
-    <div class="dt-foot p-tap" onclick="openReset('${t.id}')">Reset the clock</div>
-    ${pinnedBar(t.id)}
+    <div class="td2-foot">
+      <span class="export p-tap" onclick="exportTracker('${t.id}')">Export this tracker</span>
+      <span class="reset p-tap" onclick="openReset('${t.id}')">Reset the clock</span>
+    </div>
   `;
 }
 
@@ -1196,6 +1369,7 @@ function fmtAskAt(hhmm) {
 function renderLayer() {
   const L = ui.layer;
   if (L === 'craving') return sheet(renderCravingSheet());
+  if (L === 'question') return sheet(renderQuestionSheetInner());
   if (L === 'reset') return sheet(renderResetSheet());
   if (L === 'note') return sheet(renderNoteSheet());
   if (L === 'reason') return sheet(renderReasonSheet());
@@ -1225,40 +1399,46 @@ function cravingTracker() {
   return pool.slice().sort((a, b) => daysSince(a.start) - daysSince(b.start))[0];
 }
 
+// Urge help states the user's own odds instead of recommending — no
+// "Start here" card. Each measured tool carries used/passed from S.urges.
 function renderCravingSheet() {
   const t = cravingTracker();
-  const rough = t && (difficultyOn(todayYMD(), t.id) || {}).answer === 'rough';
-  const plan = t && planToday(t.id);
   const kicker = WD[new Date().getDay()] + ', ' + fmtTime(new Date());
-  let line;
-  if (plan && !plan.skipped && (plan.choice || plan.custom)) {
-    line = `Tonight's plan: ${plan.custom || plan.choice}. It'll still peak and fade in about fifteen minutes.`;
-  } else if (rough) {
-    line = "You already knew today would be hard. It'll still peak and fade in about fifteen minutes.";
-  } else {
-    line = "It'll peak and fade in about fifteen minutes. You've been here before.";
-  }
+  const d = t ? daysSince(t.start) : null;
   const nReasons = t ? reasonsFor(t.id).length : S.reasons.length;
+  const stats = t ? toolStats(t.id) : {};
+
+  const SHORT_LABEL = { breathe: 'Breathe', reasons: 'Reasons', wait: 'Wait', tap: 'Tap it out' };
+  const rows = URGE_TOOLS.map(tool => {
+    const st = stats[tool.key] || { used: 0, passed: 0 };
+    const label = tool.key === 'reasons' ? `Read your ${nReasons} reason${nReasons === 1 ? '' : 's'}` : tool.label;
+    const pct = st.used >= URGE_RATE_THRESHOLD ? Math.round(st.passed / st.used * 100) : -1;
+    return { key: tool.key, used: st.used, passed: st.passed, label, pct };
+  });
+  const topPct = Math.max(-1, ...rows.map(r => r.pct));
+  const rowsHtml = rows.map(r => `
+    <button class="ug-row p-tap" onclick="tryUrgeTool('${r.key}')">
+      <span class="stack"><span class="lbl">${esc(r.label)}</span><span class="sub">used ${r.used} · passed ${r.passed}</span></span>
+      ${r.pct < 0
+        ? `<span class="rate low">too few</span>`
+        : `<span class="rate${r.pct === topPct ? ' top' : ''}">${r.pct}%</span>`}
+    </button>`).join('')
+    + `<button class="ug-row p-tap" onclick="startReminder()"><span class="stack"><span class="lbl">A line to sit with</span></span><span class="time">a moment</span></button>`
+    + `<button class="ug-row p-tap" onclick="logUrgeOnly()"><span class="lbl">Log this urge, do nothing else</span><span class="time">2 min</span></button>`;
+
+  // best-rated tool for the "Breathe"-shortcut footer button
+  const best = rows.filter(r => r.pct >= 0).sort((a, b) => b.pct - a.pct)[0];
+  const bestKey = best ? best.key : 'breathe';
+  const bestLabel = SHORT_LABEL[bestKey];
 
   return `
-    <div style="display:flex;flex-direction:column;gap:7px">
-      <div class="kicker">${esc(kicker)}</div>
-      <div class="craving-line">${esc(line)}</div>
+    <div class="ug-kicker-row"><span>${esc(kicker)}</span><span class="day">${d != null ? 'day ' + d : ''}</span></div>
+    <div class="ug-stat">${esc(urgesStatement(t ? t.id : null))}</div>
+    <div class="ug-list">${rowsHtml}</div>
+    <div class="ug-foot">
+      <button class="outline p-tap" onclick="urgeItPassed()">It passed</button>
+      <button class="primary p-tap" onclick="tryUrgeTool('${bestKey}')">${esc(bestLabel)}</button>
     </div>
-    <div class="reco">
-      <div class="k">Start here</div>
-      <div class="t">Breathe for one minute, then decide.</div>
-      <div class="s">You don't have to commit to anything past the minute.</div>
-      <button class="go p-tap" onclick="startBreathing()">Begin</button>
-    </div>
-    <div class="quiet-list">
-      <button class="quiet-row p-tap" onclick="cravingToReasons()"><span class="lbl">Read your ${nReasons} reason${nReasons === 1 ? '' : 's'}</span><span class="dur">1 min</span></button>
-      <button class="quiet-row p-tap" onclick="startTimer()"><span class="lbl">Set a 10-minute delay</span><span class="dur">10 min</span></button>
-      <button class="quiet-row p-tap" onclick="startTap()"><span class="lbl">Tap it out</span><span class="dur">for your hands</span></button>
-      <button class="quiet-row p-tap" onclick="startReminder()"><span class="lbl">A line to sit with</span><span class="dur">a moment</span></button>
-      <button class="quiet-row p-tap" onclick="cravingToNote()"><span class="lbl">Write down what set this off</span><span class="dur">2 min</span></button>
-    </div>
-    <div class="link-quiet p-tap" onclick="closeLayer()" style="padding-bottom:4px">It passed — close this</div>
   `;
 }
 
@@ -1441,7 +1621,7 @@ function renderReminderOverlay() {
       <div class="reminder-src">${esc(attribution)}</div>
     </div>
     <div class="stack">
-      <button class="timer-btn p-tap" onclick="anotherReminder()">Another</button>
+      <button class="btn-again p-tap" onclick="anotherReminder()">Another</button>
       <button class="done faint p-tap" onclick="closeLayer()">I'm done</button>
     </div>
   </div>`;
@@ -1559,11 +1739,29 @@ function go(screen) {
   ui.screen = screen;
   ui.layer = null;
   ui._focusId = null;
+  ui.reasonsFromUrge = false;
   if (screen !== 'learn') ui.search = { mode: 'idle', query: '', results: null, error: false };
   render();
 }
 function openDetail(id) { stopClocks(); ui.detailId = id; ui.screen = 'detail'; ui.layer = null; render(); }
-function closeLayer() { stopClocks(); ui.layer = null; ui._focusId = null; render(); }
+
+// Closing a tool overlay (breathe/timer/tap/reminder) opened from urge help
+// returns to the urge-help sheet rather than dropping straight to home, so
+// "It passed" and the other tools stay reachable. Any other close is final.
+function closeLayer() {
+  stopClocks();
+  const wasUrgeTool = ['breathe', 'timer', 'tap', 'reminder'].indexOf(ui.layer) >= 0 && ui.urgeHelpActive;
+  ui.layer = null;
+  ui._focusId = null;
+  if (wasUrgeTool) {
+    ui.layer = 'craving';
+  } else {
+    ui.urgeHelpActive = false;
+    ui.urgeEntryId = null;
+    ui.urgeTrackerId = null;
+  }
+  render();
+}
 
 // ---- check-in actions -------------------------
 
@@ -1577,7 +1775,10 @@ async function recordCheckin(fields) {
   await persist('checkins', 'skipInfo');
 }
 
-async function setDifficulty(trackerId, key) {
+// The compact row writes one tracker's difficulty at a time, with no
+// render/toast of its own — batch callers (checkinPickTracker/-All) write
+// several before rendering once.
+async function writeDifficulty(trackerId, key) {
   const date = todayYMD();
   S.checkins = S.checkins.filter(c =>
     !(c.date === date && ((c.question === 'difficulty' && c.trackerId === trackerId) || c.skipped)));
@@ -1585,15 +1786,44 @@ async function setDifficulty(trackerId, key) {
   S.skipInfo.streak = 0;
   S.skipInfo.pausedUntil = null;
   await persist('checkins', 'skipInfo');
+}
+function finishCheckinWrite() {
   ui.draft = {};
   render();
   if (todaysQuestionDone()) {
     const anyRough = visibleTrackers().some(t => (difficultyOn(todayYMD(), t.id) || {}).answer === 'rough');
     toast(anyRough
       ? "Noted. There's a craving button under your thumb whenever you need it."
-      : 'Noted. See you tomorrow.');
+      : 'Noted.');
   }
 }
+
+// Tapping a chip in the compact row. trackerId is null for the
+// tracker-agnostic "Today" row (multiple visible trackers): Easy writes
+// straight through for all of them, Manageable/Rough asks which one first.
+async function checkinDifficulty(trackerId, key) {
+  if (trackerId) { await writeDifficulty(trackerId, key); finishCheckinWrite(); return; }
+  const vis = visibleTrackers();
+  if (key === 'easy') {
+    for (const t of vis) await writeDifficulty(t.id, 'easy');
+    finishCheckinWrite();
+  } else {
+    ui.draft.pendingDifficulty = key;
+    render();
+  }
+}
+async function checkinPickTracker(id) {
+  const key = ui.draft.pendingDifficulty;
+  for (const t of visibleTrackers()) await writeDifficulty(t.id, t.id === id ? key : 'easy');
+  finishCheckinWrite();
+}
+async function checkinPickAll() {
+  const key = ui.draft.pendingDifficulty;
+  for (const t of visibleTrackers()) await writeDifficulty(t.id, key);
+  finishCheckinWrite();
+}
+
+function openQuestionSheet() { stopClocks(); ui.layer = 'question'; render(); }
 
 async function skipToday() {
   S.skipInfo.streak = (S.skipInfo.streak || 0) + 1;
@@ -1603,6 +1833,7 @@ async function skipToday() {
   S.checkins.push({ date, at: new Date().toISOString(), question: 'skip', trackerId: null, answer: null, skipped: true });
   await persist('checkins', 'skipInfo');
   ui.draft = {};
+  ui.layer = null;
   render();
   toast('Skipped. Three in a row and it stops asking for a week.');
 }
@@ -1644,6 +1875,7 @@ async function saveTriggerAnswer() {
     await persist('notes');
   }
   ui.draft = {};
+  ui.layer = null;
   render();
   toast('Noted. See you tomorrow.');
 }
@@ -1670,12 +1902,14 @@ async function savePlan() {
   await persist('plans');
   await recordCheckin({ question: 'plan', trackerId: tId, answer: custom || choice });
   ui.draft = {};
+  ui.layer = null;
   render();
-  toast('Locked in. The craving screen will show it tonight.');
+  toast('Locked in. Urge help will show it tonight.');
 }
 async function noPlanToday() {
   await recordCheckin({ question: 'plan', trackerId: qTrackerId(), answer: null });
   ui.draft = {};
+  ui.layer = null;
   render();
   toast('No plan today. See you tomorrow.');
 }
@@ -1690,6 +1924,7 @@ async function weekAnswer(keep) {
   }
   await recordCheckin({ question: 'week', answer: keep ? 'kept' : 'no' });
   ui.draft = {};
+  ui.layer = null;
   render();
   toast(keep ? 'Kept it with your reasons.' : 'Noted. See you next week.');
 }
@@ -1701,11 +1936,13 @@ async function saveMilestone(trackerId, n) {
   S.reasons.push({ id: uid(), trackerId, text, writtenAt: new Date().toISOString(), source: 'milestone' });
   await persist('reasons');
   await recordCheckin({ question: 'milestone', trackerId, milestoneN: n, answer: text });
+  ui.layer = null;
   render();
   toast('Kept it with your reasons.');
 }
 async function skipMilestone(trackerId, n) {
   await recordCheckin({ question: 'milestone', trackerId, milestoneN: n, answer: null, skipped: true });
+  ui.layer = null;
   render();
 }
 
@@ -1720,19 +1957,68 @@ async function deleteReason(id) {
 
 // ---- craving sheet --------------------------
 
-function openCraving(trackerId) { stopClocks(); ui.layer = 'craving'; ui.draft = trackerId ? { cravingTrackerId: trackerId } : {}; render(); }
-function cravingToReasons() {
-  const t = cravingTracker();
-  ui.layer = null;
-  ui.reasonsFilter = (t || visibleTrackers()[0] || {}).id;
-  ui.screen = 'reasons';
+function openCraving(trackerId) {
+  stopClocks();
+  ui.layer = 'craving';
+  ui.draft = trackerId ? { cravingTrackerId: trackerId } : {};
+  ui.urgeTrackerId = (cravingTracker() || {}).id || null;
+  ui.urgeHelpActive = false;
+  ui.urgeEntryId = null;
   render();
 }
-function cravingToNote() {
-  const t = cravingTracker();
-  ui.draft = { trackerId: (t || visibleTrackers()[0] || {}).id };
-  ui.layer = 'note';
+
+// Tapping a measured tool row: log the attempt, then launch it. "Read your
+// reasons" leaves the sheet for the reasons screen — see backFromReasons()
+// for the return trip. The others open as overlays on top of the sheet.
+function tryUrgeTool(key) {
+  ui.urgeHelpActive = true;
+  const tid = ui.urgeTrackerId;
+  if (key === 'reasons') {
+    ui.urgeEntryId = logUrge(tid, 'reasons');
+    reasonsFor(tid).forEach(r => bumpReasonShown(r.id));
+    ui.reasonsFromUrge = true;
+    ui.layer = null;
+    ui.reasonsFilter = tid;
+    ui.screen = 'reasons';
+    render();
+    return;
+  }
+  ui.urgeEntryId = logUrge(tid, key);
+  ({ breathe: startBreathing, wait: startTimer, tap: startTap }[key] || startBreathing)();
+}
+
+function backFromReasons() {
+  if (ui.reasonsFromUrge) {
+    ui.reasonsFromUrge = false;
+    ui.screen = 'home';
+    ui.layer = 'craving';
+    render();
+    return;
+  }
+  go('home');
+}
+
+// Not a measured tool — always closes the sheet.
+function logUrgeOnly() {
+  logUrge(ui.urgeTrackerId, 'log');
+  ui.layer = null;
+  ui.urgeHelpActive = false;
+  ui.urgeEntryId = null;
   render();
+  toast('Logged.');
+}
+
+// "It passed": resolves whichever tool is in progress, or stands alone if
+// no tool was tried yet.
+function urgeItPassed() {
+  if (ui.urgeEntryId) resolveUrge(ui.urgeEntryId, 'passed');
+  else logUrge(ui.urgeTrackerId, null);
+  ui.layer = null;
+  ui.urgeHelpActive = false;
+  ui.urgeEntryId = null;
+  ui.urgeTrackerId = null;
+  render();
+  toast("Good — that's logged.");
 }
 
 // ---- exercises -----------------------------
@@ -1791,13 +2077,20 @@ let _lastReminderText = null;
 function pickReminder() {
   const pool = REMINDERS
     .concat(webReminders)
-    .concat(S.reasons.map(r => ({ t: r.text, a: 'your own words', src: 'reason' })));
+    .concat(S.reasons.map(r => ({ t: r.text, a: 'your own words', src: 'reason', id: r.id })));
   const choices = pool.length > 1 ? pool.filter(q => q.t !== _lastReminderText) : pool;
   const q = choices[Math.floor(Math.random() * choices.length)] || pool[0];
   _lastReminderText = q.t;
+  if (q && q.id) bumpReasonShown(q.id);
   return q;
 }
-function startReminder() { stopClocks(); ui.layer = 'reminder'; ui.reminder = pickReminder(); render(); }
+async function bumpReasonShown(reasonId) {
+  const r = S.reasons.find(x => x.id === reasonId);
+  if (r) { r.shownCount = (r.shownCount || 0) + 1; await persist('reasons'); }
+}
+// A line to sit with — not a measured tool (its row carries no percentage),
+// but reachable only from urge help, so it still returns to that sheet.
+function startReminder() { ui.urgeHelpActive = true; stopClocks(); ui.layer = 'reminder'; ui.reminder = pickReminder(); render(); }
 function anotherReminder() { ui.reminder = pickReminder(); render(); }
 
 // ---- note / reason sheets -------------------
@@ -1893,11 +2186,15 @@ async function confirmReset() {
   const runLen = Math.max(0, Math.floor((when.getTime() - new Date(t.start).getTime()) / DAY));
   const prevBest = pastBest(t);
   t.runs = t.runs || [];
-  t.runs.unshift({ endedOn: when.toISOString(), length: runLen });
+  // triggerId ("ended by") is filled in by the slip flow below, or stays
+  // null — "not logged" — if the user skips that question.
+  t.runs.unshift({ endedOn: when.toISOString(), length: runLen, triggerId: null });
   t.best = Math.max(prevBest, runLen);
   t.start = when.toISOString();
   S.lastReset = { trackerId: t.id, at: Date.now() };
   await persist('trackers', 'lastReset');
+  // An urge in progress just ended in a reset, not a pass.
+  if (ui.urgeEntryId) { resolveUrge(ui.urgeEntryId, 'slip'); ui.urgeEntryId = null; ui.urgeHelpActive = false; ui.urgeTrackerId = null; }
   ui.draft = { trackerId: t.id, prevBest };
   ui.layer = 'slip';
   render();
@@ -1909,8 +2206,9 @@ async function saveSlipTrigger() {
   const t = trackerById(d.trackerId);
   if (d.trigger) {
     await bumpTrigger(d.trigger);
+    if (t.runs && t.runs[0]) t.runs[0].triggerId = d.trigger;
     S.notes.push({ id: uid(), trackerId: t.id, triggerId: d.trigger, text: 'Logged from the reset screen.', createdAt: new Date().toISOString(), auto: true });
-    await persist('notes');
+    await persist('trackers', 'notes');
   }
   ui.layer = null; ui.draft = {};
   ui.screen = 'detail';
@@ -1949,6 +2247,28 @@ function exportData() {
   const a = document.createElement('a');
   a.href = url;
   a.download = 'free-backup-' + todayYMD() + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('Exported. Keep the file somewhere safe.');
+}
+
+function exportTracker(id) {
+  const t = trackerById(id);
+  if (!t) return;
+  const dump = {
+    tracker: t,
+    reasons: reasonsFor(id),
+    notes: notesFor(id),
+    urges: urgesFor(id),
+    exportedAt: new Date().toISOString()
+  };
+  const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'free-' + t.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + todayYMD() + '.json';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -2091,15 +2411,16 @@ function writeFromArticle() {
 
 Object.assign(window, {
   go, openDetail, closeLayer, openCraving,
-  setDifficulty, skipToday, pickTriggerChip, openCustomTrigger, commitCustomTrigger,
+  checkinDifficulty, checkinPickTracker, checkinPickAll, openQuestionSheet,
+  skipToday, pickTriggerChip, openCustomTrigger, commitCustomTrigger,
   saveTriggerAnswer, triggerWriteInstead, pickPlan, savePlan, noPlanToday, weekAnswer,
-  saveMilestone, skipMilestone, setReasonsFilter, deleteReason,
-  cravingToReasons, cravingToNote, startBreathing, startTimer, toggleTimer, startTap, doTap,
+  saveMilestone, skipMilestone, setReasonsFilter, deleteReason, backFromReasons,
+  tryUrgeTool, urgeItPassed, logUrgeOnly, startBreathing, startTimer, toggleTimer, startTap, doTap,
   startReminder, anotherReminder,
   openNoteSheet, noteTrigger, saveNote, openReasonSheet, cycleReasonPrompt, saveReason,
   openTrackerSheet, trackRowClick, trName, trColor, trToggleHidden, saveTracker, deleteTracker,
   openReset, confirmReset, slipTrigger, saveSlipTrigger, closeSlip,
-  toggleSetting, setAskAt, openDeleteAll, deleteAll, exportData,
+  toggleSetting, setAskAt, openDeleteAll, deleteAll, exportData, exportTracker,
   obPickName, obPickColor, obStartMode, obNext, obFinish,
   startTyping, onSearchInput, cancelSearch, commitSearch, keepSearch,
   openResult, toggleSaveResult, openArticle, backFromArticle, toggleSaveArticle, writeFromArticle

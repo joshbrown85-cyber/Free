@@ -4,14 +4,15 @@ A private, on-device PWA for tracking abstinence streaks and getting through cra
 
 ## What it does
 
-The home screen **asks one question a day** and answering it is the whole interaction — it never asks the same question two days running, and if there's nothing worth asking it just holds the numbers. Those answers are what let the app learn which days are hard and warn you in the morning instead of reacting at 9pm.
+Home is **the ledger**, not a question: every tracker sits on one screen with its own 7-day strip and a footer line of counts, your recent notes underneath. It reads like a record you keep rather than an app that coaches you. Ground is true black; terracotta is rationed to mark the current run and nothing else.
 
-- **Check-in (home)** — one of five questions: difficulty ("how hard does today feel?"), trigger (the morning after a rough day), the plan (the morning of a known-hard day), the week (Sundays), or a milestone question at 30 / 100 / 365 days. Skipping is always allowed; three skips in a row and it pauses for a week.
-- **Per-tracker** — the difficulty question is asked once for every visible tracker on a single screen (with one tracker it collapses to the plain three-option question). Everything downstream — the "which weekday is hardest" claim, the plan question, the trigger you're asked to name, and what the craving sheet surfaces — is scoped to the tracker it's actually about. The specialised questions still fire at most once a day.
-- **Hidden trackers** — a hidden tracker's clock keeps running but it drops out of the daily check-in and the home summary. It's still fully usable: tap it in Settings to open its detail screen (runs, notes, reset, edit).
-- **Craving sheet** — pinned under your thumb on every screen. Scoped to the tracker most at risk (rough today, or the shortest current streak) — or to the tracker whose detail screen you opened it from. One recommended action plus a quiet list: guided breathing, a 10-minute delay timer, a tap-it-out exercise, a line to sit with (a curated pool, your own reasons, plus web quotes and AI reflections when Online extras is on), your reasons, or a quick note.
-- **Reasons** — your own writing, set large, filtered per tracker (hidden trackers included) — there to read mid-craving.
-- **Tracker detail** — every run as a bar you can read against the others, your notes in date order, and reset-the-clock as a line of text (never a button).
+- **The ledger (home)** — one dense block per visible tracker: name, day count, a 7-day strip (today's bar in the tracker's own colour), then `best Nd` and `N reasons · N notes`. Hidden trackers collapse to a single tappable row. Below the trackers, your two most recent notes.
+- **The daily check-in is a compact row**, not a screen. It sits above the first tracker, shown only until answered: difficulty renders as inline chips (with a "which one?" follow-up when more than one tracker is visible and the answer isn't Easy); trigger / plan / week / milestone open the same question as a sheet. `Skip today` is always available; three skips in a row pauses it for a week.
+- **Per-tracker** — everything downstream (the "which weekday is hardest" claim, the plan question, the trigger you're asked to name) is scoped to the tracker it's actually about.
+- **Hidden trackers** — a hidden tracker's clock keeps running but it drops out of the daily check-in and renders as a single row on the ledger. Still fully usable: tap it to open its detail screen.
+- **Urge help** — reachable from the ledger's footer, a tracker's detail screen, or Reasons. States your own odds instead of recommending: "You've logged 14 urges. Twelve of them passed inside twenty minutes," then every tool (breathe, read your reasons, wait ten minutes, tap it out) listed with its own `used N · passed N` and a success rate — no "start here" card, you choose. A line to sit with and logging the urge with no exercise are listed too, unmeasured. `It passed` resolves whichever tool is in progress; resetting the clock mid-urge marks it a slip instead.
+- **Reasons** — numbered, one per block, in Fraunces — with `shown N times`, counting how often each has surfaced mid-urge (opened via "Read your reasons", or picked as a line to sit with).
+- **Tracker detail** — runs as a table (started / length / **ended by**, the trigger logged at reset time), with a tally of what ends your runs underneath. Notes in date order. Export and reset-the-clock are text, never buttons.
 - **Learn** — opens with a recommendation tied to your most-logged trigger, then a "Suggested reading" list fetched for what you track (both on-device once fetched); free-text search of habit/addiction reading; saved articles cached for offline.
 - **Settings** — add / rename / hide / reorder trackers, check-in preferences, and export.
 
@@ -24,15 +25,18 @@ All data is stored locally using IndexedDB. No backend, no account, no analytics
 - **Learn's article search** — the query string only; your trackers and notes are never part of it. Degrades to an offline screen when it fails.
 - **Online extras** (Settings → Online, on by default) — on launch, fetches web-sourced quotes and suggested reading matched to what you track, and short reflection lines. The reflection call is the one place the app sends anything you wrote: your **reasons** text goes to the serverless function (which uses Claude) to build them. Turn the toggle off and none of this runs. Everything fetched is cached on device and the app works fully without it.
 
-The two `Craving right now` copy lines about "reading isn't the only thing that helps" and "your trackers and notes aren't part of the search" remain accurate for the search action.
+Learn's own copy lines — "reading isn't the only thing that helps" and "your trackers and notes aren't part of the search" — remain accurate for the search action.
 
 ### Data model
 
-Beyond trackers / reasons / notes, three concepts drive the check-in:
+Beyond trackers / reasons / notes, four concepts drive the check-in and urge help:
 
-- **`checkins`** — `date`, `question`, `answer`, `skipped`, `trackerId`. The difficulty question writes one row per visible tracker per day; trigger / plan / milestone write one row naming their tracker; week / skip write a trackerless row. The 14-day history strip, the "which weekday is hardest" claim (needs ~10 answered days for that tracker), hard-day detection and the week counts are all derived per tracker.
-- **`triggers`** — a single shared trigger vocabulary (`label`, `count`, `lastUsed`), referenced by id from notes and check-in answers. Chips everywhere are drawn from this list, which is what makes "you logged work stress 3 times" possible — free text can't be counted.
-- **`plans`** — `date`, `trackerId`, `choice`, `custom` — written by the plan question in the morning, read back by that tracker's craving sheet in the evening.
+- **`checkins`** — `date`, `question`, `answer`, `skipped`, `trackerId`. The difficulty question writes one row per visible tracker per day; trigger / plan / milestone write one row naming their tracker; week / skip write a trackerless row. The 7-day strip on each ledger row, the "which weekday is hardest" claim (needs ~10 answered days for that tracker), hard-day detection and the week counts are all derived per tracker.
+- **`triggers`** — a single shared trigger vocabulary (`label`, `count`, `lastUsed`), referenced by id from notes, check-in answers, and now a run's `triggerId` ("ended by"). Chips everywhere are drawn from this list, which is what makes "you logged work stress 3 times" possible — free text can't be counted.
+- **`plans`** — `date`, `trackerId`, `choice`, `custom` — written by the plan question in the morning, read back by that tracker's urge help in the evening.
+- **`urges`** — `id`, `at`, `trackerId`, `tool`, `outcome`. One row per tool tried from urge help (`tool` is `breathe` / `reasons` / `wait` / `tap` / `log`, or `null` for "It passed" with no tool tried). `outcome` is `'passed'`, `'slip'` (the clock got reset while the tool was open), or `null` (never resolved). Drives both the per-tool `used/passed` rate and the top-line "you've logged N urges" statement; `reminder` ("a line to sit with") is deliberately not logged here — it isn't a tool whose success is measured.
+
+A tracker's `runs` also each carry a `triggerId` now (or `null` — "not logged"), set by the slip screen right after a reset; tracker detail's runs table and "what ends your runs" tally read straight from it. A reason's `shownCount` — incremented whenever it's opened via "Read your reasons" or picked as a line to sit with — backs the "shown N times" line on the Reasons screen.
 
 Legacy data is migrated automatically on first load. v1 (the old four-tab app): streak history becomes per-tracker runs, journal entries become notes with trigger-vocabulary rows, colours map to the new four-swatch set. v2 → v3: blended check-ins and plans are assigned to the first visible tracker.
 
