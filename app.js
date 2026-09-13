@@ -384,18 +384,6 @@ function todaysQuestionDone() {
   return vis.length > 0 && vis.every(t => difficultyOn(today, t.id));
 }
 
-function history14(trackerId) {
-  const out = [];
-  for (let i = 13; i >= 0; i--) {
-    const c = difficultyOn(shiftYMD(-i), trackerId);
-    if (c && c.answer === 'rough') out.push({ h: '100%', c: 'var(--chart-hi)' });
-    else if (c && c.answer === 'manageable') out.push({ h: '65%', c: 'var(--chart-mid)' });
-    else if (c) out.push({ h: '30%', c: 'var(--chart-lo)' });
-    else out.push({ h: '12%', c: 'var(--chart-lo)' });
-  }
-  return out;
-}
-
 function patternInfo(trackerId) {
   const answered = S.checkins.filter(c => !c.skipped && c.question === 'difficulty' && c.trackerId === trackerId);
   if (answered.length < PATTERN_THRESHOLD) return { claim: null, weekday: null };
