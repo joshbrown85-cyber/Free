@@ -34,9 +34,14 @@
 'use strict';
 
 const DAY = 86400000;
-const SCHEMA = 3;
+const SCHEMA = 4;
 
-const SWATCHES = ['#7fc3ac', '#8fb3d9', '#d9a86c', '#c48f8f'];
+// #7fc3ac (the old theme's --accent-bright) was swatch 1 here; the Ledger
+// handoff calls that whole green family "gone", so it's replaced with the
+// handoff's own `second` token — still a fixed four, just not a friend of
+// the retired accent green. The other three (unrelated to that family) stay.
+const SWATCHES = ['#7c8f86', '#8fb3d9', '#d9a86c', '#c48f8f'];
+const RETIRED_SWATCH = '#7fc3ac';
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const MONTHS_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const WD = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -197,7 +202,7 @@ async function migrate() {
 
   if (looksLegacy) {
     const colorMap = h => {
-      const m = { '#5F8B7A': '#7fc3ac', '#1D9E75': '#7fc3ac', '#378ADD': '#8fb3d9', '#7F77DD': '#8fb3d9', '#C9874A': '#d9a86c', '#D4537E': '#c48f8f' };
+      const m = { '#5F8B7A': SWATCHES[0], '#1D9E75': SWATCHES[0], '#378ADD': '#8fb3d9', '#7F77DD': '#8fb3d9', '#C9874A': '#d9a86c', '#D4537E': '#c48f8f' };
       return m[h] || SWATCHES[0];
     };
     S.trackers = legacyTrackers.map((t, i) => {
@@ -243,6 +248,13 @@ async function migrate() {
       if (c.trackerId == null && c.question === 'difficulty') c.trackerId = primary;
     });
     S.plans.forEach(p => { if (p.trackerId == null) p.trackerId = primary; });
+  }
+
+  // v3 -> v4: the Ledger redesign retires #7fc3ac (the old theme's
+  // accent-bright) as a tracker swatch — any tracker still wearing it moves
+  // to its Ledger replacement, same slot in the four-swatch set.
+  if ((S.schemaVersion || 0) < 4) {
+    S.trackers.forEach(t => { if (t.color === RETIRED_SWATCH) t.color = SWATCHES[0]; });
   }
 
   S.schemaVersion = SCHEMA;
